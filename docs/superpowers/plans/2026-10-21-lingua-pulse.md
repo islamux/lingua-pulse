@@ -4430,6 +4430,10 @@ git commit -m "feat: add the background scheduler that wakes up when a card is d
 Create `tests/test_diagnostics.py`:
 
 ```python
+import os
+
+import pytest
+
 from linguapulse import __version__, cli, config, daemon, diagnostics, notify, paths, store
 
 PAST = "2020-01-01T09:00:00+00:00"
@@ -4544,6 +4548,19 @@ def test_the_paths_check_reports_an_unwritable_directory(home, monkeypatch):
     check = diagnostics.check_paths()
     assert check.ok is False
     assert "permission denied" in check.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_the_paths_check_reports_a_read_only_directory(home):
+    directory = paths.data_dir()
+    directory.chmod(0o555)
+    try:
+        check = diagnostics.check_paths()
+    finally:
+        directory.chmod(0o755)
+    assert check.ok is False
+    assert str(directory) in check.detail
+    assert "not writable" in check.detail
 
 
 def test_the_deck_check_reports_a_file_that_is_not_json(home):
@@ -4756,7 +4773,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import config, daemon, models, notify, paths, scheduler, store
 
@@ -4783,16 +4802,34 @@ def _counted(count: int, singular: str) -> str:
     return f"{count} {singular}s"
 
 
+def _probe_writable(directory: Path) -> None:
+    """Write and remove a probe file to prove that the directory is writable."""
+    descriptor, name = tempfile.mkstemp(
+        dir=directory, prefix=".linguapulse-probe-", suffix=".tmp"
+    )
+    try:
+        os.write(descriptor, b"probe\n")
+    finally:
+        os.close(descriptor)
+        Path(name).unlink(missing_ok=True)
+
+
 def check_paths() -> Check:
     """Check that the data directories exist and are writable."""
     try:
         paths.ensure_dirs()
     except OSError as exc:
         return Check("paths", False, f"the data directory is not writable: {exc}")
+    directories = (paths.data_dir(), paths.config_dir(), paths.state_dir())
+    for directory in directories:
+        try:
+            _probe_writable(directory)
+        except OSError as exc:
+            return Check("paths", False, f"{directory} is not writable: {exc}")
     return Check(
         "paths",
         True,
-        f"data {paths.data_dir()}, config {paths.config_dir()}, state {paths.state_dir()}",
+        f"data {directories[0]}, config {directories[1]}, state {directories[2]}",
     )
 
 
@@ -4969,7 +5006,7 @@ def run_checks() -> list[Check]:
 
 Run: `python3 -m pytest tests/test_diagnostics.py -v`
 
-Expected: PASS, 33 tests.
+Expected: PASS, 34 tests.
 
 - [ ] **Step 5: Add the doctor command**
 
@@ -5024,7 +5061,7 @@ In `command_status` of `src/linguapulse/cli.py`, add these lines before the fina
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, 216 tests, every test of every task.
+Expected: PASS, 217 tests, every test of every task.
 
 - [ ] **Step 8: Commit (only when the user explicitly requested commits)**
 
