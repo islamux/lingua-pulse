@@ -3832,7 +3832,7 @@ git commit -m "feat: add the deck commands to the cli"
 
 **Interfaces:**
 - Consumes: `models` from Task 4, `notify` from Task 7, `paths` from Task 3, `scheduler` from Task 8.
-- Produces: `daemon.DeliveryReport(delivered, skipped, notified, message)`, `daemon.FailureLog(every=10)` with `should_log(key) -> bool`, `daemon.acquire_lock(path=None)`, `daemon.write_pid(path=None)`, `daemon.read_pid(path=None) -> int | None`, `daemon.remove_pid(path=None)`, `daemon.scheduler_is_running(path=None) -> bool`, `daemon.signal_scheduler(path=None) -> bool`, `daemon.deliver_due(cards, states, moment, notifier=None) -> DeliveryReport`, `daemon.run(max_iterations=None, idle_timeout=None) -> int`.
+- Produces: `daemon.DeliveryReport(delivered, skipped, notified, message)`, `daemon.FailureLog(every=10)` with `should_log(key) -> bool` and `recovered() -> bool`, `daemon.acquire_lock(path=None)`, `daemon.write_pid(path=None)`, `daemon.read_pid(path=None) -> int | None`, `daemon.remove_pid(path=None)`, `daemon.scheduler_is_running(path=None) -> bool`, `daemon.signal_scheduler(path=None) -> bool`, `daemon.deliver_due(cards, states, moment, notifier=None) -> DeliveryReport`, `daemon.run(max_iterations=None, idle_timeout=None) -> int`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3974,6 +3974,15 @@ def test_the_failure_log_reports_the_first_and_every_tenth_failure():
     assert failures.should_log("boom") is True
 
 
+def test_the_failure_log_reports_the_recovery():
+    failures = daemon.FailureLog(every=10)
+    assert failures.recovered() is False
+    failures.should_log("boom")
+    assert failures.recovered() is True
+    assert failures.recovered() is False
+    assert failures.should_log("boom") is True
+
+
 def test_the_loop_stops_after_the_configured_number_of_iterations(home):
     assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
 
@@ -4020,7 +4029,7 @@ from datetime import datetime, timezone
 
 Run: `python3 -m pytest tests/test_daemon.py -v`
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'linguapulse.daemon'`.
+Expected: FAIL with `ImportError: cannot import name 'daemon' from 'linguapulse'`, the module does not exist yet.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -4064,12 +4073,22 @@ class FailureLog:
     def __init__(self, every: int = 10) -> None:
         self.every = max(1, every)
         self.counts: dict[str, int] = {}
+        self.current = ""
 
     def should_log(self, key: str) -> bool:
         """Return True when the failure should be written to the log."""
+        self.current = key
         count = self.counts.get(key, 0) + 1
         self.counts[key] = count
         return count == 1 or count % self.every == 0
+
+    def recovered(self) -> bool:
+        """Forget the failure streak and return True when there was one."""
+        if not self.current:
+            return False
+        self.current = ""
+        self.counts.clear()
+        return True
 
 
 def acquire_lock(path: Path | None = None) -> io.TextIOWrapper | None:
@@ -4261,6 +4280,8 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
             if report.message and not report.notified:
                 if failures.should_log(report.message):
                     print(f"notification problem: {report.message}", file=sys.stderr, flush=True)
+            elif report.notified and failures.recovered():
+                print("notifications are being delivered again", file=sys.stderr, flush=True)
             next_at = scheduler.next_wakeup(cards, states, models.now_utc())
             timeout = RESCAN_SECONDS
             if next_at is not None:
@@ -4289,7 +4310,7 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
 
 Run: `python3 -m pytest tests/test_daemon.py -v`
 
-Expected: PASS, 13 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Wire the CLI to the scheduler**
 
@@ -4337,7 +4358,7 @@ def command_daemon(args: argparse.Namespace) -> int:
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test of every task.
+Expected: PASS, 182 tests, every test of every task.
 
 - [ ] **Step 8: Commit (only when the user explicitly requested commits)**
 
