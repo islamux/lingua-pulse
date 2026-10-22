@@ -129,6 +129,20 @@ def test_cli_version_flag(capsys):
 
     assert main(["--version"]) == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_cli_help_returns_zero(capsys):
+    from linguapulse.cli import main
+
+    assert main(["--help"]) == 0
+    capsys.readouterr()
+
+
+def test_cli_unknown_flag_returns_two(capsys):
+    from linguapulse.cli import main
+
+    assert main(["--not-a-real-flag"]) == 2
+    capsys.readouterr()
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -238,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
 
 Run: `python3 -m pytest tests/test_package.py -v`
 
-Expected: PASS, 3 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -273,6 +287,13 @@ def test_normalize_returns_nfc_form():
     assert text.normalize(decomposed) != decomposed
 
 
+def test_char_width_reports_the_columns_of_one_character():
+    assert text.char_width("a") == 1
+    assert text.char_width("你") == 2
+    assert text.char_width("\u0301") == 0
+    assert text.char_width(text.PDI) == 0
+
+
 def test_display_width_counts_latin_and_arabic_as_one_column():
     assert text.display_width("hello") == 5
     assert text.display_width("مرحبا") == 5
@@ -296,6 +317,14 @@ def test_pad_uses_display_width_not_character_count():
     assert text.pad("你好", 6) == "你好  "
     assert text.pad("ab", 4) == "ab  "
     assert text.pad("ab", 4, align="right") == "  ab"
+
+
+def test_pad_centers_the_text_in_the_gap():
+    assert text.pad("ab", 6, align="center") == "  ab  "
+
+
+def test_pad_keeps_text_that_is_wider_than_the_width():
+    assert text.pad("你好", 2) == "你好"
 
 
 def test_contains_rtl_detects_right_to_left_scripts():
@@ -397,7 +426,7 @@ def strip_isolates(text: str) -> str:
 
 Run: `python3 -m pytest tests/test_text.py -v`
 
-Expected: PASS, 9 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -483,6 +512,15 @@ def test_read_json_raises_on_broken_json(tmp_path):
     broken.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError):
         store.read_json(broken, None)
+
+
+def test_read_json_raises_a_plain_value_error_for_a_broken_document(tmp_path):
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        store.read_json(broken, None)
+    assert not isinstance(excinfo.value, json.JSONDecodeError)
+    assert str(broken) in str(excinfo.value)
 
 
 def test_write_json_keeps_unicode_unescaped(tmp_path):
@@ -682,7 +720,7 @@ def read_jsonl(path: Path) -> list[Any]:
 
 Run: `python3 -m pytest tests/test_paths.py tests/test_store.py -v`
 
-Expected: PASS, 10 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -1317,7 +1355,7 @@ def test_the_interval_is_capped():
     state = srs.new_state("hello", NOW)
     for _ in range(30):
         state = srs.apply_grade(state, "easy", NOW, ZONE)
-    assert state.interval_days <= srs.MAX_INTERVAL_DAYS
+    assert state.interval_days == srs.MAX_INTERVAL_DAYS
 
 
 def test_grading_clears_the_handled_occurrence():
@@ -1337,6 +1375,30 @@ def test_a_day_interval_keeps_the_local_time_of_day_across_a_dst_change():
     before = datetime(2026, 3, 28, 9, 0, tzinfo=timezone.utc)
     state = srs.apply_grade(srs.new_state("hello", before), "good", before, zone)
     assert state.due_dt().astimezone(zone).strftime("%Y-%m-%d %H:%M") == "2026-03-29 10:00"
+
+
+def test_apply_grade_does_not_mutate_the_input_state():
+    state = srs.new_state("hello", NOW)
+    before = (
+        state.due,
+        state.interval_days,
+        state.ease,
+        state.reps,
+        state.lapses,
+        state.handled_due,
+        state.notifiable,
+    )
+    _ = srs.apply_grade(state, "good", NOW, ZONE)
+    after = (
+        state.due,
+        state.interval_days,
+        state.ease,
+        state.reps,
+        state.lapses,
+        state.handled_due,
+        state.notifiable,
+    )
+    assert after == before
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1450,7 +1512,7 @@ def apply_grade(
 
 Run: `python3 -m pytest tests/test_srs.py -v`
 
-Expected: PASS, 12 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -1476,7 +1538,7 @@ git commit -m "feat: add spaced repetition grading"
 Create `tests/test_config.py`:
 
 ```python
-from linguapulse import config, paths
+from linguapulse import config, models, paths
 
 
 def test_defaults_are_used_when_no_file_exists(tmp_path, monkeypatch):
@@ -1503,6 +1565,28 @@ def test_a_broken_file_falls_back_to_the_defaults(tmp_path, monkeypatch):
     paths.config_path().write_text('{"source_lang": 5}', encoding="utf-8")
     settings = config.load_config()
     assert settings.source_lang == config.DEFAULT_SOURCE_LANG
+
+
+def test_a_file_that_is_not_valid_json_falls_back_to_the_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_HOME, str(tmp_path))
+    paths.ensure_dirs()
+    paths.config_path().write_text("{not json", encoding="utf-8")
+    settings = config.load_config()
+    assert settings.source_lang == config.DEFAULT_SOURCE_LANG
+    assert settings.target_lang == config.DEFAULT_TARGET_LANG
+    assert settings.notify_enabled is True
+
+
+def test_an_unsupported_language_falls_back_to_the_default(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_HOME, str(tmp_path))
+    paths.ensure_dirs()
+    paths.config_path().write_text(
+        '{"source_lang": "de", "target_lang": "fr"}', encoding="utf-8"
+    )
+    assert "de" not in models.SUPPORTED_LANGUAGES
+    settings = config.load_config()
+    assert settings.source_lang == config.DEFAULT_SOURCE_LANG
+    assert settings.target_lang == "fr"
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1575,7 +1659,7 @@ def save_config(settings: Config) -> None:
 
 Run: `python3 -m pytest tests/test_config.py -v`
 
-Expected: PASS, 3 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -1636,6 +1720,22 @@ def test_notify_send_path_is_none_when_it_is_not_installed():
     assert notify.notify_send_path({"PATH": "/nonexistent"}) is None
 
 
+def test_notify_send_path_is_none_without_a_path_in_the_environment():
+    assert notify.notify_send_path({"XDG_RUNTIME_DIR": "/run/user/1000"}) is None
+
+
+def test_the_notification_daemon_is_not_looked_up_without_a_path(monkeypatch):
+    listing = (
+        "NAME                           PID PROCESS  USER  CONNECTION  UNIT\n"
+        "org.freedesktop.Notifications  3576 dunst    user  :1.20       app-org.freedesktop.Notifications.service\n"
+    )
+    monkeypatch.setattr(
+        notify.subprocess, "run", lambda *args, **kwargs: FakeCompleted(0, listing)
+    )
+    env = {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+    assert notify.notification_daemon(env) is None
+
+
 def test_send_without_notify_send_reports_an_actionable_error():
     result = notify.send("title", "body", env={"PATH": "/nonexistent", "XDG_RUNTIME_DIR": "/run/user/1000"})
     assert result.ok is False
@@ -1643,7 +1743,8 @@ def test_send_without_notify_send_reports_an_actionable_error():
     assert "notify-send" in result.message
 
 
-def test_send_without_a_session_bus_explains_the_problem():
+def test_send_without_a_session_bus_explains_the_problem(monkeypatch):
+    monkeypatch.setattr(notify.shutil, "which", lambda name, path=None: "/usr/bin/notify-send")
     result = notify.send("title", "body", env={"PATH": "/usr/bin:/bin"})
     assert result.ok is False
     assert "session bus" in result.message
@@ -1670,6 +1771,19 @@ def test_send_reports_success(monkeypatch):
     assert result.code == 0
 
 
+def test_send_reports_a_timeout_as_a_failure(monkeypatch):
+    monkeypatch.setattr(notify.shutil, "which", lambda name, path=None: "/usr/bin/notify-send")
+
+    def fake_run(args, **kwargs):
+        raise notify.subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(notify.subprocess, "run", fake_run)
+    result = notify.send("title", "body", env=BUS_ENV)
+    assert result.ok is False
+    assert result.code == 124
+    assert "timed out" in result.message
+
+
 def test_the_bus_address_is_passed_to_the_child_process(monkeypatch):
     captured = {}
 
@@ -1681,6 +1795,27 @@ def test_the_bus_address_is_passed_to_the_child_process(monkeypatch):
     monkeypatch.setattr(notify.subprocess, "run", fake_run)
     notify.send("title", "body", env={"XDG_RUNTIME_DIR": "/run/user/1000", "PATH": "/usr/bin:/bin"})
     assert captured["env"]["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+
+
+def test_the_arguments_carry_the_title_and_the_body(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return FakeCompleted(0)
+
+    monkeypatch.setattr(notify.shutil, "which", lambda name, path=None: "/usr/bin/notify-send")
+    monkeypatch.setattr(notify.subprocess, "run", fake_run)
+    notify.send("learned word", "the body of the notification", env=BUS_ENV, urgency="critical")
+    args = captured["args"]
+    assert args[0] == "/usr/bin/notify-send"
+    assert "--urgency=critical" in args
+    separator = args.index("--")
+    assert args[separator + 1] == "learned word"
+    assert args[separator + 2] == "the body of the notification"
+    assert args[separator + 3 :] == []
+    notify.send("title", "body", env=BUS_ENV)
+    assert "--urgency=normal" in captured["args"]
 
 
 def test_the_notification_daemon_is_read_from_the_bus(monkeypatch):
@@ -1861,7 +1996,7 @@ git commit -m "feat: add notification delivery with actionable diagnostics"
 - Create: `tests/test_scheduler.py`
 
 **Interfaces:**
-- Consumes: `models.Card`, `models.CardState`, `models.parse_iso` from Task 4, `srs.GRACE_MINUTES` from Task 5.
+- Consumes: `models.Card`, `models.CardState`, `models.safe_parse_iso` from Task 4, `srs.GRACE_MINUTES` from Task 5.
 - Produces: `scheduler.Occurrence(card, due, state)` with the property `due_iso`, `scheduler.Reminder(due, group, skipped)` with the property `handled`, `scheduler.occurrence_due(card, state, moment) -> datetime`, `scheduler.pending_occurrences(cards, states, moment) -> list[Occurrence]`, `scheduler.next_wakeup(cards, states, moment) -> datetime | None`, `scheduler.plan_reminder(pending, moment) -> Reminder | None`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1917,10 +2052,41 @@ def test_pending_occurrences_skips_an_occurrence_that_was_already_handled():
     assert scheduler.pending_occurrences(cards, states, NOW) == []
 
 
+def test_pending_occurrences_reminds_a_card_that_got_a_new_due_time():
+    cards = {"hello": make_card()}
+    states = {
+        "hello": state_for(
+            "hello",
+            "2026-10-21T08:00:00+00:00",
+            handled_due="2026-10-20T08:00:00+00:00",
+        )
+    }
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    assert [occurrence.card.id for occurrence in pending] == ["hello"]
+
+
 def test_pending_occurrences_skips_relearn_cards():
     cards = {"hello": make_card()}
     states = {"hello": state_for("hello", "2026-10-21T08:55:00+00:00", notifiable=False)}
     assert scheduler.pending_occurrences(cards, states, NOW) == []
+
+
+def test_a_card_without_a_state_has_no_scheduled_review():
+    cards = {"hello": make_card()}
+    assert scheduler.pending_occurrences(cards, {}, NOW) == []
+    assert scheduler.next_wakeup(cards, {}, NOW) is None
+
+
+def test_a_card_without_a_state_does_not_suppress_a_card_that_is_due():
+    cards = {
+        "fresh": make_card("fresh", created_at="2026-10-21T08:58:00+00:00"),
+        "due": make_card("due"),
+    }
+    states = {"due": state_for("due", "2026-10-21T08:55:00+00:00")}
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    reminder = scheduler.plan_reminder(pending, NOW)
+    assert [occurrence.card.id for occurrence in reminder.group] == ["due"]
+    assert reminder.skipped == ()
 
 
 def test_next_wakeup_returns_the_soonest_future_occurrence():
@@ -1938,6 +2104,24 @@ def test_next_wakeup_is_none_without_a_future_occurrence():
     assert scheduler.next_wakeup(cards, states, NOW) is None
 
 
+def test_a_relearn_card_does_not_produce_a_wakeup():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T12:00:00+00:00", notifiable=False)}
+    assert scheduler.next_wakeup(cards, states, NOW) is None
+
+
+def test_an_already_handled_occurrence_does_not_produce_a_wakeup():
+    cards = {"hello": make_card()}
+    states = {
+        "hello": state_for(
+            "hello",
+            "2026-10-21T12:00:00+00:00",
+            handled_due="2026-10-21T12:00:00+00:00",
+        )
+    }
+    assert scheduler.next_wakeup(cards, states, NOW) is None
+
+
 def test_the_latest_overdue_reminder_within_the_grace_window_is_selected():
     cards = {"old": make_card("old"), "late": make_card("late")}
     states = {
@@ -1948,6 +2132,16 @@ def test_the_latest_overdue_reminder_within_the_grace_window_is_selected():
     reminder = scheduler.plan_reminder(pending, NOW)
     assert [occurrence.card.id for occurrence in reminder.group] == ["late"]
     assert [occurrence.card.id for occurrence in reminder.skipped] == ["old"]
+    assert reminder.due == datetime(2026, 10, 21, 8, 55, tzinfo=timezone.utc)
+
+
+def test_a_reminder_that_is_exactly_at_the_grace_limit_is_delivered():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:45:00+00:00")}
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    reminder = scheduler.plan_reminder(pending, NOW)
+    assert [occurrence.card.id for occurrence in reminder.group] == ["hello"]
+    assert reminder.skipped == ()
 
 
 def test_older_reminders_are_never_replayed():
@@ -1991,6 +2185,13 @@ def test_a_broken_due_falls_back_to_the_creation_time():
     states = {"hello": state_for("hello", "not a timestamp")}
     due = scheduler.occurrence_due(cards["hello"], states["hello"], NOW)
     assert due == datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
+
+
+def test_the_due_iso_of_an_occurrence_round_trips():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:00:00+00:00")}
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    assert models.safe_parse_iso(pending[0].due_iso) == pending[0].due
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -2065,6 +2266,28 @@ def occurrence_due(
     return moment
 
 
+def _scheduled_review(
+    card: models.Card,
+    state: models.CardState | None,
+    moment: datetime,
+) -> Occurrence | None:
+    """Return the scheduled review of a card, or None when it has none.
+
+    A card without a state has no scheduled review: it is never due, it never
+    wakes the scheduler up and it is never reminded. The relearn step of an
+    "again" grade is not notifiable, so it is not reminded either. An
+    occurrence that was already acted on is not a review any more.
+    """
+    if state is None or not state.notifiable:
+        return None
+    due = occurrence_due(card, state, moment)
+    if state.handled_due:
+        handled = models.safe_parse_iso(state.handled_due)
+        if handled is not None and handled == due:
+            return None
+    return Occurrence(card=card, due=due, state=state)
+
+
 def pending_occurrences(
     cards: Mapping[str, models.Card],
     states: Mapping[str, models.CardState],
@@ -2073,18 +2296,10 @@ def pending_occurrences(
     """Return the occurrences that are due and that were not acted on yet."""
     pending: list[Occurrence] = []
     for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        if state is not None and not state.notifiable:
+        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
+        if occurrence is None or occurrence.due > moment:
             continue
-        due = occurrence_due(card, state, moment)
-        if due > moment:
-            continue
-        if state is not None and state.handled_due:
-            handled = models.safe_parse_iso(state.handled_due)
-            if handled is not None and handled == due:
-                continue
-        pending.append(Occurrence(card=card, due=due, state=state))
+        pending.append(occurrence)
     return pending
 
 
@@ -2096,18 +2311,10 @@ def next_wakeup(
     """Return the exact time of the next occurrence worth waking up for."""
     candidates: list[datetime] = []
     for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        if state is None or not state.notifiable:
+        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
+        if occurrence is None or occurrence.due <= moment:
             continue
-        due = occurrence_due(card, state, moment)
-        if due <= moment:
-            continue
-        if state.handled_due:
-            handled = models.safe_parse_iso(state.handled_due)
-            if handled is not None and handled == due:
-                continue
-        candidates.append(due)
+        candidates.append(occurrence.due)
     return min(candidates) if candidates else None
 
 
@@ -2128,7 +2335,7 @@ def plan_reminder(pending: Iterable[Occurrence], moment: datetime) -> Reminder |
 
 Run: `python3 -m pytest tests/test_scheduler.py -v`
 
-Expected: PASS, 12 tests.
+Expected: PASS, 19 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
