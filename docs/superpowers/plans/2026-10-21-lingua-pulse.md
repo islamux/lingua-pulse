@@ -2635,17 +2635,25 @@ git commit -m "feat: add card selection and terminal rendering"
 
 **Interfaces:**
 - Consumes: `config.load_config` from Task 6, `models` from Task 4, `paths` from Task 3, `review` from Task 9, `srs` from Task 5, `store` from Task 3.
-- Produces: `cli.main(argv) -> int`, `cli.build_parser()`, `cli.format_local(moment) -> str`, `cli.command_show(args)`, `cli.command_next(args)`, `cli.command_history(args)`, `cli.command_status(args)`, `cli.command_validate(args)`.
+- Produces: `cli.main(argv) -> int`, `cli.build_parser()`, `cli.format_local(moment) -> str`, `cli.local_stamp(value) -> str`, `cli.plural(count, singular, plural_form=None) -> str`, `cli.load_session()`, `cli.resolve_language(language, fallback)`, `cli.report_nothing_due(cards, states, moment)`, `cli.command_show(args)`, `cli.command_next(args)`, `cli.command_history(args)`, `cli.command_status(args)`, `cli.command_validate(args)`.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_cli.py`:
 
 ```python
-from linguapulse import cli, models, paths, store
+from datetime import datetime
+
+from conftest import make_card, write_broken_deck, write_deck, write_states
+from linguapulse import cli, config, models, paths, store
 
 PAST = "2020-01-01T09:00:00+00:00"
 FUTURE = "2099-01-01T09:00:00+00:00"
+
+
+def test_format_local_reads_a_naive_timestamp_as_utc(monkeypatch):
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    assert cli.format_local(datetime(2026, 10, 22, 9, 0)) == "2026-10-22 17:00 CST"
 
 
 def test_show_prints_the_due_card_without_the_answer(home, capsys):
@@ -2671,6 +2679,60 @@ def test_show_reports_when_nothing_is_due(home, capsys):
     assert "Nothing is due" in capsys.readouterr().out
 
 
+def test_show_uses_the_requested_language_without_storing_it(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["show", "--reveal", "--lang", "zh"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("zh:") < out.index("ar:")
+    assert config.load_config().target_lang == "ar"
+
+
+def test_show_shows_the_requested_number_of_cards(home, capsys):
+    write_deck([make_card("hello"), make_card("world")])
+    write_states(
+        {
+            "hello": models.CardState(card_id="hello", due=PAST),
+            "world": models.CardState(card_id="world", due=PAST),
+        }
+    )
+    assert cli.main(["show", "--count", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "1 of 2" in out
+    assert "2 of 2" in out
+
+
+def test_show_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
+
+
+def test_show_reports_a_broken_state_file(home, capsys):
+    write_deck([make_card()])
+    paths.state_path().write_text("{", encoding="utf-8")
+    assert cli.main(["show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
+
+
+def test_show_rejects_an_unknown_language(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["show", "--lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "error: unknown language 'xx', the supported languages are "
+        "ar, en, es, fr, tr, zh" in captured.err
+    )
+
+
 def test_next_grades_the_due_card_and_records_the_review(home, capsys):
     write_deck([make_card()])
     write_states({"hello": models.CardState(card_id="hello", due=PAST)})
@@ -2688,6 +2750,36 @@ def test_next_reports_when_nothing_is_due(home, capsys):
     write_states({"hello": models.CardState(card_id="hello", due=FUTURE)})
     assert cli.main(["next", "good"]) == 0
     assert "Nothing is due" in capsys.readouterr().out
+
+
+def test_next_hides_the_translations_on_request(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["next", "good", "--hide"]) == 0
+    out = capsys.readouterr().out
+    assert "مرحبا" not in out
+    assert "Graded 'good'" in out
+
+
+def test_next_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["next", "good"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
+
+
+def test_next_rejects_an_unknown_language(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["next", "good", "--lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "error: unknown language 'xx', the supported languages are "
+        "ar, en, es, fr, tr, zh" in captured.err
+    )
 
 
 def test_history_lists_the_recorded_reviews(home, capsys):
@@ -2710,12 +2802,76 @@ def test_history_filters_by_card(home, capsys):
     assert "No reviews" in capsys.readouterr().out
 
 
+def test_history_limits_the_number_of_entries(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    cli.main(["next", "good"])
+    capsys.readouterr()
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    cli.main(["next", "good"])
+    capsys.readouterr()
+    assert cli.main(["history", "--limit", "1"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len([line for line in lines if "good" in line]) == 1
+
+
+def test_history_prints_the_local_time(home, capsys, monkeypatch):
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    store.append_jsonl(
+        paths.history_path(),
+        {
+            "ts": "2020-01-01T09:00:00+00:00",
+            "card_id": "hello",
+            "grade": "good",
+            "due": "2020-01-02T09:00:00+00:00",
+        },
+    )
+    assert cli.main(["history"]) == 0
+    out = capsys.readouterr().out
+    assert "2020-01-01 17:00 CST" in out
+    assert "2020-01-02 17:00 CST" in out
+    assert "2020-01-01T09:00:00+00:00" not in out
+
+
+def test_history_keeps_a_broken_timestamp(home, capsys):
+    paths.history_path().write_text(
+        '{"ts": "not a time", "card_id": "hello", "grade": "good"}\n', encoding="utf-8"
+    )
+    assert cli.main(["history"]) == 0
+    assert "not a time" in capsys.readouterr().out
+
+
 def test_status_reports_the_deck_size(home, capsys):
     write_deck([make_card()])
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert "1 card" in out
     assert "Time zone" in out
+
+
+def test_status_reports_the_due_cards_the_next_card_and_the_languages(home, capsys):
+    write_deck([make_card("hello"), make_card("later")])
+    write_states(
+        {
+            "hello": models.CardState(card_id="hello", due=PAST),
+            "later": models.CardState(card_id="later", due=FUTURE),
+        }
+    )
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "2 cards" in out
+    assert "1 card" in out
+    assert "later" in out
+    assert "Languages: source en, target ar" in out
+
+
+def test_status_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["status"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
 
 
 def test_validate_accepts_a_clean_deck(home, capsys):
@@ -2737,6 +2893,15 @@ def test_validate_reports_a_broken_card(home, capsys):
 def test_validate_reports_a_missing_deck(home, capsys):
     assert cli.main(["validate"]) == 1
     assert "No deck file" in capsys.readouterr().out
+
+
+def test_validate_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["validate"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "problem:" in captured.out
+    assert "is not valid JSON" in captured.out
 ```
 
 Add the shared fixtures and helpers to `tests/conftest.py`:
@@ -2772,6 +2937,11 @@ def write_deck(cards):
     models.save_deck(paths.deck_path(), {card.id: card for card in cards})
 
 
+def write_broken_deck():
+    """Write a deck file that is not valid JSON."""
+    paths.deck_path().write_text('{"version": 1, "cards": {', encoding="utf-8")
+
+
 def write_states(states):
     """Write card states to the state file."""
     models.save_states(paths.state_path(), states)
@@ -2780,7 +2950,7 @@ def write_states(states):
 Add this import at the top of `tests/test_cli.py`, so that the file uses the shared helpers:
 
 ```python
-from conftest import make_card, write_deck, write_states
+from conftest import make_card, write_broken_deck, write_deck, write_states
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -2803,14 +2973,32 @@ entry to the parser and one entry to the dispatch table.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+import sys
+from datetime import datetime, timezone
 
 from . import __version__, config, models, paths, review, srs, store
 
 
 def format_local(moment: datetime) -> str:
-    """Format a timestamp in the local time zone."""
+    """Format a timestamp in the local time zone.
+
+    A timestamp without a time zone is read as UTC, the way `models.parse_iso`
+    reads it, so that the two agree on what a naive timestamp means.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(models.local_zone()).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def local_stamp(value: str | None) -> str:
+    """Format a stored timestamp in the local time zone.
+
+    A timestamp that cannot be parsed is shown the way it is stored.
+    """
+    moment = models.safe_parse_iso(value or "")
+    if moment is None:
+        return value or "?"
+    return format_local(moment)
 
 
 def plural(count: int, singular: str, plural_form: str | None = None) -> str:
@@ -2818,6 +3006,59 @@ def plural(count: int, singular: str, plural_form: str | None = None) -> str:
     if count == 1:
         return f"{count} {singular}"
     return f"{count} {plural_form or singular + 's'}"
+
+
+def load_session() -> tuple[
+    config.Config,
+    dict[str, models.Card],
+    dict[str, models.CardState],
+    datetime,
+] | None:
+    """Load the configuration, the deck, the states and the current moment.
+
+    None is returned and the problem is reported on stderr when the deck file
+    or the state file cannot be read.
+    """
+    paths.ensure_dirs()
+    settings = config.load_config()
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
+    return settings, cards, states, models.now_utc()
+
+
+def resolve_language(language: str | None, fallback: str) -> str | None:
+    """Return the language to show first, or None when it is not supported.
+
+    The problem is reported on stderr when the requested language is unknown.
+    """
+    if language is None:
+        return fallback
+    if language in models.SUPPORTED_LANGUAGES:
+        return language
+    supported = ", ".join(models.SUPPORTED_LANGUAGES)
+    print(
+        f"error: unknown language {language!r}, the supported languages are {supported}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def report_nothing_due(
+    cards: dict[str, models.Card],
+    states: dict[str, models.CardState],
+    moment: datetime,
+) -> None:
+    """Report that no card is due and name the next scheduled card."""
+    upcoming = review.next_due(cards, states, moment)
+    if upcoming is None:
+        print("Nothing is due right now, and no card is scheduled.")
+    else:
+        _, when = upcoming
+        print(f"Nothing is due right now. Next card at {format_local(when)}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2851,22 +3092,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def command_show(args: argparse.Namespace) -> int:
     """Print the cards that are due."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
+    target = resolve_language(args.lang, settings.target_lang)
+    if target is None:
+        return 2
     due = review.due_cards(cards, states, moment)
     if not due:
-        upcoming = review.next_due(cards, states, moment)
-        if upcoming is None:
-            print("Nothing is due right now, and no card is scheduled.")
-        else:
-            _, when = upcoming
-            print(f"Nothing is due right now. Next card at {format_local(when)}.")
+        report_nothing_due(cards, states, moment)
         return 0
     count = max(1, args.count)
-    target = args.lang or settings.target_lang
     shown = due[:count]
     for index, card in enumerate(shown, start=1):
         print(
@@ -2884,22 +3121,18 @@ def command_show(args: argparse.Namespace) -> int:
 
 def command_next(args: argparse.Namespace) -> int:
     """Grade the card that is due and record the review."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
+    target = resolve_language(args.lang, settings.target_lang)
+    if target is None:
+        return 2
     card = review.current_card(cards, states, moment)
     if card is None:
-        upcoming = review.next_due(cards, states, moment)
-        if upcoming is None:
-            print("Nothing is due right now, and no card is scheduled.")
-        else:
-            _, when = upcoming
-            print(f"Nothing is due right now. Next card at {format_local(when)}.")
+        report_nothing_due(cards, states, moment)
         return 0
     state = states.get(card.id) or srs.new_state(card.id, moment)
-    target = args.lang or settings.target_lang
     print(review.render_card(card, target_lang=target, reveal=not args.hide))
     print()
     updated = srs.apply_grade(state, args.grade, moment)
@@ -2931,19 +3164,18 @@ def command_history(args: argparse.Namespace) -> int:
         return 0
     for entry in entries:
         print(
-            f"{entry.get('ts', '?')}  {entry.get('card_id', '?')}  "
-            f"{entry.get('grade', '?')}  -> {entry.get('due', '?')}"
+            f"{local_stamp(entry.get('ts'))}  {entry.get('card_id', '?')}  "
+            f"{entry.get('grade', '?')}  -> {local_stamp(entry.get('due'))}"
         )
     return 0
 
 
 def command_status(args: argparse.Namespace) -> int:
     """Print the deck, the schedule and the local configuration."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
     due = review.due_cards(cards, states, moment)
     upcoming = review.next_due(cards, states, moment)
     print(f"lingua-pulse {__version__}")
@@ -2963,7 +3195,12 @@ def command_status(args: argparse.Namespace) -> int:
 def command_validate(args: argparse.Namespace) -> int:
     """Check the deck file and report every problem."""
     path = paths.deck_path()
-    raw = store.read_json(path, None)
+    try:
+        raw = store.read_json(path, None)
+    except ValueError as error:
+        print(f"problem: {error}")
+        print(f"{plural(1, 'problem')} found.")
+        return 1
     if raw is None:
         print(f"No deck file at {path}")
         return 1
@@ -2998,7 +3235,7 @@ def main(argv: list[str] | None = None) -> int:
 
 Run: `python3 -m pytest tests/test_cli.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 26 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
