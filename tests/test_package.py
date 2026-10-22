@@ -21,3 +21,17 @@ def test_cli_version_flag(capsys):
 
     assert main(["--version"]) == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_cli_help_returns_zero(capsys):
+    from linguapulse.cli import main
+
+    assert main(["--help"]) == 0
+    capsys.readouterr()
+
+
+def test_cli_unknown_flag_returns_two(capsys):
+    from linguapulse.cli import main
+
+    assert main(["--not-a-real-flag"]) == 2
+    capsys.readouterr()
