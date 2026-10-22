@@ -5177,7 +5177,7 @@ def test_remove_autostart_without_a_block_does_nothing(home, tmp_path, monkeypat
 
 Run: `python3 -m pytest tests/test_service.py -v`
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'linguapulse.service'`.
+Expected: FAIL with `ImportError: cannot import name 'service' from 'linguapulse'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -5378,7 +5378,7 @@ def uninstall() -> list[str]:
 
 Run: `python3 -m pytest tests/test_service.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Add the install and uninstall commands**
 
@@ -5427,13 +5427,13 @@ Add the dispatch entries:
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test.
+Expected: PASS, 227 tests, every test of every task.
 
 - [ ] **Step 7: Commit (only when the user explicitly requested commits)**
 
 ```bash
-git add src/linguapulse/service.py src/linguapulse/cli.py tests/test_service.py
-git commit -m "feat: install the systemd user unit and the herbstluftwm autostart"
+git add src/linguapulse/cli.py src/linguapulse/service.py tests/test_service.py
+git commit -m "feat: add the service installation and the autostart"
 ```
 
 ---
