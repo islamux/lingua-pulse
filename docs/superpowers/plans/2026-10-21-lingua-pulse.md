@@ -5571,7 +5571,7 @@ reminds you once, exactly when the word is due.
 
 * No GUI, no tray icon, no web server, no background database.
 * Standard library only, Python 3.11 or newer.
-* One notification per due word, never a pile of leftovers.
+* One notification per due moment, never a pile of leftovers.
 
 ## Install
 
@@ -5631,13 +5631,13 @@ occurrence was handled and computes the next wake up.
 ## How the notifications behave
 
 * One notification per due moment, no retries.
-* When the notification cannot be delivered, the problem is written to the log
-  of the service and the reason is actionable.
+* When the notification cannot be delivered, the problem is written to the service
+  log (`journalctl --user -u linguapulse.service`) and the reason is actionable.
 
-  If no notification appears, run `linguapulse doctor`: when the notification
-  infrastructure is missing it prints three commands that diagnose the failure,
-  a direct `notify-send` test, a `busctl` lookup of the notification daemon and
-  the check that `DBUS_SESSION_BUS_ADDRESS` reaches the scheduler.
+  If no notification appears, run `linguapulse doctor`: it prints the steps that
+  diagnose the failure: a direct `notify-send` test, a `busctl` lookup of the
+  notification daemon and the check that `DBUS_SESSION_BUS_ADDRESS` reaches the
+  scheduler.
 * Identical failures are logged once and then only every tenth time.
 
 ## Files
@@ -5704,32 +5704,28 @@ PYTHONPATH=src python3 -m linguapulse doctor
 
 Expected: the seed adds the bundled cards, `show` prints the due card, `next
 good` grades it and reports the next review, `history` lists the review,
-`status` shows one due card, `validate` reports no problems and `doctor`
-reports the state of the installation. The doctor exits with 1 when a check
-fails, which is the case while the scheduler is not running yet.
+`status` lists the remaining due cards (nine of the ten seeded, after one
+grading), `validate` reports no problems and `doctor` reports the state of the
+installation. The doctor exits with 1 when a check fails, which is the case
+while the scheduler is not running yet.
 
-- [ ] **Step 5: Verify the generated unit file**
-
-```bash
-systemd-analyze --user verify ~/.config/systemd/user/linguapulse.service
-```
-
-Expected: no error about the unit file.
-
-- [ ] **Step 6: Check the install and uninstall round trip in a scratch home**
+- [ ] **Step 5: Check the install and uninstall round trip and the generated unit file in a scratch home**
 
 ```bash
 export XDG_CONFIG_HOME="$(mktemp -d)"
 export LINGUAPULSE_AUTOSTART="$(mktemp)"
-python3 -m linguapulse install --executable /usr/bin/env
+PYTHONPATH=src python3 -m linguapulse install --executable /usr/bin/env
 cat "$LINGUAPULSE_AUTOSTART"
-python3 -m linguapulse uninstall
+systemd-analyze --user verify "$XDG_CONFIG_HOME/systemd/user/linguapulse.service"
+PYTHONPATH=src python3 -m linguapulse uninstall
 ```
 
-Expected: the install writes the unit and adds the marked block, the uninstall
-removes both again and leaves the autostart file otherwise unchanged.
+Expected: the install writes the unit and adds the marked block, the unit file
+passes `systemd-analyze --user verify` (skip that line when `systemd-analyze` is
+not installed), the uninstall removes both again and leaves the autostart file
+otherwise unchanged.
 
-- [ ] **Step 7: Commit (only when the user explicitly requested commits)**
+- [ ] **Step 6: Commit (only when the user explicitly requested commits)**
 
 ```bash
 git add README.md
