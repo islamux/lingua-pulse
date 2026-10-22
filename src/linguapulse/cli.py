@@ -13,7 +13,7 @@ import sys
 from datetime import datetime, timezone
 from importlib import resources
 
-from . import __version__, config, daemon, diagnostics, models, paths, review, srs, store, text
+from . import __version__, config, daemon, diagnostics, models, paths, review, service, srs, store, text
 
 
 def format_local(moment: datetime) -> str:
@@ -195,6 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("daemon", help="run the scheduler in the foreground")
     commands.add_parser("doctor", help="check the installation")
+
+    install_parser = commands.add_parser("install", help="install the scheduler service")
+    install_parser.add_argument("--executable", help="command that starts lingua-pulse")
+
+    commands.add_parser("uninstall", help="remove the scheduler service")
 
     return parser
 
@@ -463,6 +468,22 @@ def command_doctor(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def command_install(args: argparse.Namespace) -> int:
+    """Install the systemd user unit and the herbstluftwm autostart."""
+    executable = args.executable or service.default_executable()
+    for step in service.install(executable):
+        print(step)
+    print("Log out and back in, or run: systemctl --user start linguapulse.service")
+    return 0
+
+
+def command_uninstall(args: argparse.Namespace) -> int:
+    """Remove the systemd user unit and the herbstluftwm autostart."""
+    for step in service.uninstall():
+        print(step)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the command line interface and return the process exit code."""
     parser = build_parser()
@@ -482,5 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         "config": command_config,
         "daemon": command_daemon,
         "doctor": command_doctor,
+        "install": command_install,
+        "uninstall": command_uninstall,
     }
     return handlers[args.command](args)
