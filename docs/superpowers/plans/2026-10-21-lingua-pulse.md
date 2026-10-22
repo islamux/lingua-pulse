@@ -5089,7 +5089,9 @@ git commit -m "feat: add diagnostics and the doctor command"
 Create `tests/test_service.py`:
 
 ```python
-from linguapulse import service
+import pytest
+
+from linguapulse import cli, service
 
 
 def test_render_unit_contains_the_exec_start():
@@ -5171,6 +5173,63 @@ def test_remove_autostart_without_a_block_does_nothing(home, tmp_path, monkeypat
     monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
     assert service.remove_autostart() is False
     assert target.read_text(encoding="utf-8") == "# my own settings\n"
+
+
+def test_install_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# >>> lingua-pulse >>>\nMod4-Shift-q = close\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert cli.main(["install", "--executable", "/usr/local/bin/linguapulse"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert str(target) in captured.err
+    assert "malformed" in captured.err
+    assert "left untouched" in captured.err
+    assert target.read_text(encoding="utf-8") == original
+    assert not service.unit_path().exists()
+
+
+def test_uninstall_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "autostart"
+    original = (
+        "# my own settings\n# >>> lingua-pulse >>>\n"
+        "Mod4-Shift-q = close\nMod4-Return = spawn xterm\n"
+    )
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert cli.main(["uninstall"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert str(target) in captured.err
+    assert "malformed" in captured.err
+    assert "left untouched" in captured.err
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_install_autostart_refuses_an_orphan_end_marker(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# <<< lingua-pulse <<<\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    with pytest.raises(service.MalformedBlock):
+        service.install_autostart()
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_remove_autostart_refuses_an_orphan_end_marker(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# <<< lingua-pulse <<<\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    with pytest.raises(service.MalformedBlock):
+        service.remove_autostart()
+    assert target.read_text(encoding="utf-8") == original
+
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -5219,6 +5278,10 @@ AUTOSTART_BLOCK = f"""{AUTOSTART_BEGIN}
 systemctl --user start {UNIT_NAME}
 {AUTOSTART_END}
 """
+
+
+class MalformedBlock(ValueError):
+    """Raised when only one of the two autostart markers is present."""
 
 
 def unit_dir() -> Path:
@@ -5279,13 +5342,35 @@ def autostart_block() -> str:
     return AUTOSTART_BLOCK
 
 
-def install_autostart() -> bool:
-    """Add the marked block to the herbstluftwm autostart file."""
+def check_autostart() -> None:
+    """Raise MalformedBlock when only one of the two markers is present.
+
+    A file with no marker, or with both markers, is left to the caller. A file
+    with one marker but not the other is a hand edit or an interrupted write,
+    and neither installing nor removing can tell where the block begins and
+    ends, so the file is never touched.
+    """
     path = autostart_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    if (AUTOSTART_BEGIN in content) != (AUTOSTART_END in content):
+        raise MalformedBlock(
+            f"{path}: the marked block is malformed, only one of its markers is present, "
+            "the file was left untouched",
+        )
+
+
+def install_autostart() -> bool:
+    """Add the marked block to the herbstluftwm autostart file.
+
+    MalformedBlock is raised, and the file left untouched, when only one of the
+    two markers is present.
+    """
+    check_autostart()
+    path = autostart_path()
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     if AUTOSTART_BEGIN in original and AUTOSTART_END in original:
         return False
+    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         shutil.copy2(path, path.with_name(path.stem + ".linguapulse.bak"))
     if original and not original.endswith("\n"):
@@ -5297,10 +5382,15 @@ def install_autostart() -> bool:
 
 
 def remove_autostart() -> bool:
-    """Remove the marked block from the herbstluftwm autostart file."""
+    """Remove the marked block from the herbstluftwm autostart file.
+
+    MalformedBlock is raised, and the file left untouched, when only one of the
+    two markers is present.
+    """
     path = autostart_path()
     if not path.exists():
         return False
+    check_autostart()
     original = path.read_text(encoding="utf-8")
     if AUTOSTART_BEGIN not in original:
         return False
@@ -5341,7 +5431,12 @@ def disable() -> bool:
 
 
 def install(executable: str) -> list[str]:
-    """Install the unit and the autostart, and report every step."""
+    """Install the unit and the autostart, and report every step.
+
+    MalformedBlock is raised, and nothing is written, when only one of the two
+    autostart markers is present.
+    """
+    check_autostart()
     steps: list[str] = []
     unit = install_unit(executable)
     steps.append(f"wrote the user unit {unit}")
@@ -5358,7 +5453,12 @@ def install(executable: str) -> list[str]:
 
 
 def uninstall() -> list[str]:
-    """Remove the unit and the autostart, and report every step."""
+    """Remove the unit and the autostart, and report every step.
+
+    MalformedBlock is raised, and nothing is removed, when only one of the two
+    autostart markers is present.
+    """
+    check_autostart()
     steps: list[str] = []
     if disable():
         steps.append(f"disabled {UNIT_NAME}")
@@ -5378,7 +5478,7 @@ def uninstall() -> list[str]:
 
 Run: `python3 -m pytest tests/test_service.py -v`
 
-Expected: PASS, 10 tests.
+Expected: PASS, 14 tests.
 
 - [ ] **Step 5: Add the install and uninstall commands**
 
@@ -5403,7 +5503,12 @@ Add the command implementations:
 def command_install(args: argparse.Namespace) -> int:
     """Install the systemd user unit and the herbstluftwm autostart."""
     executable = args.executable or service.default_executable()
-    for step in service.install(executable):
+    try:
+        steps = service.install(executable)
+    except service.MalformedBlock as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    for step in steps:
         print(step)
     print("Log out and back in, or run: systemctl --user start linguapulse.service")
     return 0
@@ -5411,9 +5516,15 @@ def command_install(args: argparse.Namespace) -> int:
 
 def command_uninstall(args: argparse.Namespace) -> int:
     """Remove the systemd user unit and the herbstluftwm autostart."""
-    for step in service.uninstall():
+    try:
+        steps = service.uninstall()
+    except service.MalformedBlock as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    for step in steps:
         print(step)
     return 0
+
 ```
 
 Add the dispatch entries:
@@ -5427,7 +5538,7 @@ Add the dispatch entries:
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, 227 tests, every test of every task.
+Expected: PASS, 231 tests, every test of every task.
 
 - [ ] **Step 7: Commit (only when the user explicitly requested commits)**
 
