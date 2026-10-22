@@ -1,6 +1,13 @@
 from datetime import datetime
 
-from conftest import make_card, write_broken_deck, write_deck, write_states
+from conftest import (
+    make_card,
+    write_broken_deck,
+    write_deck,
+    write_malformed_deck,
+    write_malformed_states,
+    write_states,
+)
 from linguapulse import cli, config, models, paths, store
 
 PAST = "2020-01-01T09:00:00+00:00"
@@ -77,6 +84,16 @@ def test_show_reports_a_broken_state_file(home, capsys):
     assert "is not valid JSON" in captured.err
 
 
+def test_show_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
+
+
 def test_show_rejects_an_unknown_language(home, capsys):
     write_deck([make_card()])
     write_states({"hello": models.CardState(card_id="hello", due=PAST)})
@@ -124,6 +141,16 @@ def test_next_reports_a_broken_deck_file(home, capsys):
     assert captured.out == ""
     assert "error:" in captured.err
     assert "is not valid JSON" in captured.err
+
+
+def test_next_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["next", "good"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
 
 
 def test_next_rejects_an_unknown_language(home, capsys):
@@ -230,6 +257,16 @@ def test_status_reports_a_broken_deck_file(home, capsys):
     assert "is not valid JSON" in captured.err
 
 
+def test_status_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["status"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
+
+
 def test_validate_accepts_a_clean_deck(home, capsys):
     write_deck([make_card()])
     assert cli.main(["validate"]) == 0
@@ -258,3 +295,12 @@ def test_validate_reports_a_broken_deck_file(home, capsys):
     assert captured.err == ""
     assert "problem:" in captured.out
     assert "is not valid JSON" in captured.out
+
+
+def test_validate_reports_a_malformed_deck_file(home, capsys):
+    write_malformed_deck()
+    assert cli.main(["validate"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "problem: 'int' object is not iterable" in captured.out
+    assert "1 problem found." in captured.out

@@ -51,14 +51,14 @@ def load_session() -> tuple[
     """Load the configuration, the deck, the states and the current moment.
 
     None is returned and the problem is reported on stderr when the deck file
-    or the state file cannot be read.
+    or the state file cannot be read or holds a malformed value.
     """
     paths.ensure_dirs()
     settings = config.load_config()
     try:
         cards = models.load_deck(paths.deck_path())
         states = models.load_states(paths.state_path())
-    except ValueError as error:
+    except (ValueError, TypeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return None
     return settings, cards, states, models.now_utc()
@@ -244,7 +244,13 @@ def command_validate(args: argparse.Namespace) -> int:
     if problems:
         print(f"{plural(len(problems), 'problem')} found.")
         return 1
-    print(f"{plural(len(models.load_deck(path)), 'card')}, no problems found.")
+    try:
+        cards = models.load_deck(path)
+    except (ValueError, TypeError) as error:
+        print(f"problem: {error}")
+        print(f"{plural(1, 'problem')} found.")
+        return 1
+    print(f"{plural(len(cards), 'card')}, no problems found.")
     return 0
 
 

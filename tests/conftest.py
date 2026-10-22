@@ -33,6 +33,24 @@ def write_broken_deck():
     paths.deck_path().write_text('{"version": 1, "cards": {', encoding="utf-8")
 
 
+def write_malformed_deck():
+    """Write a deck file that is valid JSON but holds a wrongly typed field."""
+    paths.deck_path().write_text(
+        '{"version": 1, "cards": {"hello": {"id": "hello", "term": "hello", '
+        '"source_lang": "en", "translations": {"ar": "مرحبا"}, "tags": 5}}}\n',
+        encoding="utf-8",
+    )
+
+
+def write_malformed_states():
+    """Write a state file that is valid JSON but holds a wrongly typed field."""
+    paths.state_path().write_text(
+        '{"version": 1, "cards": {"hello": {"card_id": "hello", '
+        '"due": "2020-01-01T09:00:00+00:00", "reps": null}}}\n',
+        encoding="utf-8",
+    )
+
+
 def write_states(states):
     """Write card states to the state file."""
     models.save_states(paths.state_path(), states)
