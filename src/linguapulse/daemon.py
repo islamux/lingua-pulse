@@ -27,6 +27,7 @@ class DeliveryReport:
     skipped: tuple[scheduler.Occurrence, ...]
     notified: bool
     message: str
+    handled: tuple[tuple[str, str], ...] = ()
 
 
 class FailureLog:
@@ -144,13 +145,32 @@ def _notification_for(group: Sequence[scheduler.Occurrence]) -> tuple[str, str]:
 def _mark_handled(
     states: Mapping[str, models.CardState],
     occurrences: Sequence[scheduler.Occurrence],
-) -> None:
-    """Remember that these occurrences were acted on."""
+) -> tuple[tuple[str, str], ...]:
+    """Remember that these occurrences were acted on and return their marks."""
+    marks: list[tuple[str, str]] = []
     for occurrence in occurrences:
         state = occurrence.state
         if state is None:
             continue
-        state.handled_due = occurrence.due.isoformat()
+        mark = (occurrence.card.id, occurrence.due.isoformat())
+        marks.append(mark)
+        state.handled_due = mark[1]
+    return tuple(marks)
+
+
+def _save_marks(marks: Sequence[tuple[str, str]]) -> dict[str, models.CardState]:
+    """Apply the handled marks to the current state file and save it.
+
+    The states are read again right before the write, because a grade may
+    have been recorded while the notification was being sent. Only the marks
+    are applied, so the grade keeps its own due, interval and ease.
+    """
+    states = models.load_states(paths.state_path())
+    for card_id, due_iso in marks:
+        state = states.setdefault(card_id, models.CardState(card_id=card_id, due=due_iso))
+        state.handled_due = due_iso
+    models.save_states(paths.state_path(), states)
+    return states
 
 
 def deliver_due(
@@ -162,7 +182,9 @@ def deliver_due(
     """Deliver the reminder that is due and remember that it was handled.
 
     The message of the report is only set when something went wrong, so that
-    the caller can log it without writing a line for every empty round.
+    the caller can log it without writing a line for every empty round. The
+    handled marks are returned for the caller to persist, because the states
+    it read may be out of date by the time the notification was sent.
     """
     send = notifier or notify.send
     pending = scheduler.pending_occurrences(cards, states, moment)
@@ -172,18 +194,19 @@ def deliver_due(
     if reminder is None:
         return DeliveryReport((), (), False, "")
     if not reminder.group:
-        _mark_handled(states, reminder.skipped)
-        return DeliveryReport((), reminder.skipped, False, "")
+        marks = _mark_handled(states, reminder.skipped)
+        return DeliveryReport((), reminder.skipped, False, "", marks)
     title, body = _notification_for(reminder.group)
     result = send(title, body)
-    _mark_handled(states, reminder.handled)
+    marks = _mark_handled(states, reminder.handled)
     if result.ok:
-        return DeliveryReport(reminder.group, reminder.skipped, True, "")
+        return DeliveryReport(reminder.group, reminder.skipped, True, "", marks)
     return DeliveryReport(
         reminder.group,
         reminder.skipped,
         False,
         result.message or "the notification failed",
+        marks,
     )
 
 
@@ -233,8 +256,8 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
             states = models.load_states(paths.state_path())
             moment = models.now_utc()
             report = deliver_due(cards, states, moment)
-            if report.delivered or report.skipped:
-                models.save_states(paths.state_path(), states)
+            if report.handled:
+                states = _save_marks(report.handled)
             if report.delivered:
                 print(f"delivered {len(report.delivered)} reminder(s)", flush=True)
             elif report.skipped:

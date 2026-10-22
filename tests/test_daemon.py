@@ -3,10 +3,11 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import linguapulse
-from linguapulse import daemon, models, notify
+from linguapulse import daemon, models, notify, paths, srs
 
 PAST = "2020-01-01T09:00:00+00:00"
 DUE = "2026-10-21T08:55:00+00:00"
@@ -144,6 +145,27 @@ def test_the_failure_log_reports_the_recovery():
 
 def test_the_loop_stops_after_the_configured_number_of_iterations(home):
     assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
+
+
+def test_a_grade_saved_while_sending_survives_the_marks(home, moment, monkeypatch):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    graded = {}
+
+    def grade_while_sending(title, body):
+        states = models.load_states(paths.state_path())
+        graded["state"] = srs.apply_grade(states["hello"], "easy", moment)
+        models.save_states(paths.state_path(), {"hello": graded["state"]})
+        return notify.NotifyResult(True, 0, "")
+
+    monkeypatch.setattr(daemon.notify, "send", grade_while_sending)
+    assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
+    saved = models.load_states(paths.state_path())["hello"]
+    assert saved.reps == graded["state"].reps
+    assert saved.interval_days == graded["state"].interval_days
+    assert saved.ease == graded["state"].ease
+    assert saved.handled_due == due
 
 
 def test_the_scheduler_stops_on_a_terminate_signal(home):
