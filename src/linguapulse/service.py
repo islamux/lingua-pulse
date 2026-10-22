@@ -35,6 +35,10 @@ systemctl --user start {UNIT_NAME}
 """
 
 
+class MalformedBlock(ValueError):
+    """Raised when only one of the two autostart markers is present."""
+
+
 def unit_dir() -> Path:
     """Return the directory that holds the systemd user units."""
     config_home = os.environ.get("XDG_CONFIG_HOME")
@@ -93,13 +97,35 @@ def autostart_block() -> str:
     return AUTOSTART_BLOCK
 
 
-def install_autostart() -> bool:
-    """Add the marked block to the herbstluftwm autostart file."""
+def check_autostart() -> None:
+    """Raise MalformedBlock when only one of the two markers is present.
+
+    A file with no marker, or with both markers, is left to the caller. A file
+    with one marker but not the other is a hand edit or an interrupted write,
+    and neither installing nor removing can tell where the block begins and
+    ends, so the file is never touched.
+    """
     path = autostart_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    if (AUTOSTART_BEGIN in content) != (AUTOSTART_END in content):
+        raise MalformedBlock(
+            f"{path}: the marked block is malformed, only one of its markers is present, "
+            "the file was left untouched",
+        )
+
+
+def install_autostart() -> bool:
+    """Add the marked block to the herbstluftwm autostart file.
+
+    MalformedBlock is raised, and the file left untouched, when only one of the
+    two markers is present.
+    """
+    check_autostart()
+    path = autostart_path()
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     if AUTOSTART_BEGIN in original and AUTOSTART_END in original:
         return False
+    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         shutil.copy2(path, path.with_name(path.stem + ".linguapulse.bak"))
     if original and not original.endswith("\n"):
@@ -111,10 +137,15 @@ def install_autostart() -> bool:
 
 
 def remove_autostart() -> bool:
-    """Remove the marked block from the herbstluftwm autostart file."""
+    """Remove the marked block from the herbstluftwm autostart file.
+
+    MalformedBlock is raised, and the file left untouched, when only one of the
+    two markers is present.
+    """
     path = autostart_path()
     if not path.exists():
         return False
+    check_autostart()
     original = path.read_text(encoding="utf-8")
     if AUTOSTART_BEGIN not in original:
         return False
@@ -155,7 +186,12 @@ def disable() -> bool:
 
 
 def install(executable: str) -> list[str]:
-    """Install the unit and the autostart, and report every step."""
+    """Install the unit and the autostart, and report every step.
+
+    MalformedBlock is raised, and nothing is written, when only one of the two
+    autostart markers is present.
+    """
+    check_autostart()
     steps: list[str] = []
     unit = install_unit(executable)
     steps.append(f"wrote the user unit {unit}")
@@ -172,7 +208,12 @@ def install(executable: str) -> list[str]:
 
 
 def uninstall() -> list[str]:
-    """Remove the unit and the autostart, and report every step."""
+    """Remove the unit and the autostart, and report every step.
+
+    MalformedBlock is raised, and nothing is removed, when only one of the two
+    autostart markers is present.
+    """
+    check_autostart()
     steps: list[str] = []
     if disable():
         steps.append(f"disabled {UNIT_NAME}")

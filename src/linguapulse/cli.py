@@ -471,7 +471,12 @@ def command_doctor(args: argparse.Namespace) -> int:
 def command_install(args: argparse.Namespace) -> int:
     """Install the systemd user unit and the herbstluftwm autostart."""
     executable = args.executable or service.default_executable()
-    for step in service.install(executable):
+    try:
+        steps = service.install(executable)
+    except service.MalformedBlock as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    for step in steps:
         print(step)
     print("Log out and back in, or run: systemctl --user start linguapulse.service")
     return 0
@@ -479,7 +484,12 @@ def command_install(args: argparse.Namespace) -> int:
 
 def command_uninstall(args: argparse.Namespace) -> int:
     """Remove the systemd user unit and the herbstluftwm autostart."""
-    for step in service.uninstall():
+    try:
+        steps = service.uninstall()
+    except service.MalformedBlock as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    for step in steps:
         print(step)
     return 0
 

@@ -1,4 +1,6 @@
-from linguapulse import service
+import pytest
+
+from linguapulse import cli, service
 
 
 def test_render_unit_contains_the_exec_start():
@@ -80,3 +82,60 @@ def test_remove_autostart_without_a_block_does_nothing(home, tmp_path, monkeypat
     monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
     assert service.remove_autostart() is False
     assert target.read_text(encoding="utf-8") == "# my own settings\n"
+
+
+def test_install_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# >>> lingua-pulse >>>\nMod4-Shift-q = close\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert cli.main(["install", "--executable", "/usr/local/bin/linguapulse"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert str(target) in captured.err
+    assert "malformed" in captured.err
+    assert "left untouched" in captured.err
+    assert target.read_text(encoding="utf-8") == original
+    assert not service.unit_path().exists()
+
+
+def test_uninstall_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "autostart"
+    original = (
+        "# my own settings\n# >>> lingua-pulse >>>\n"
+        "Mod4-Shift-q = close\nMod4-Return = spawn xterm\n"
+    )
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert cli.main(["uninstall"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert str(target) in captured.err
+    assert "malformed" in captured.err
+    assert "left untouched" in captured.err
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_install_autostart_refuses_an_orphan_end_marker(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# <<< lingua-pulse <<<\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    with pytest.raises(service.MalformedBlock):
+        service.install_autostart()
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_remove_autostart_refuses_an_orphan_end_marker(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# <<< lingua-pulse <<<\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    with pytest.raises(service.MalformedBlock):
+        service.remove_autostart()
+    assert target.read_text(encoding="utf-8") == original
+
