@@ -4422,15 +4422,30 @@ git commit -m "feat: add the background scheduler that wakes up when a card is d
 - Create: `tests/test_diagnostics.py`
 
 **Interfaces:**
-- Consumes: `daemon` from Task 12, `models` from Task 4, `notify` from Task 7, `paths` from Task 3.
-- Produces: `diagnostics.Check(name, ok, detail)`, `diagnostics.check_paths()`, `diagnostics.check_deck()`, `diagnostics.check_notify_send()`, `diagnostics.check_session_bus()`, `diagnostics.check_notification_daemon()`, `diagnostics.check_scheduler()`, `diagnostics.run_checks() -> list[Check]`, `cli.command_doctor(args)`.
+- Consumes: `config` from Task 6, `daemon` from Task 12, `models` from Task 4, `notify` from Task 7, `paths` from Task 3, `scheduler` from Task 8.
+- Produces: `diagnostics.Check(name, ok, detail)`, `diagnostics.check_paths()`, `diagnostics.check_config()`, `diagnostics.check_deck()`, `diagnostics.check_state()`, `diagnostics.check_notify_send()`, `diagnostics.check_busctl()`, `diagnostics.check_session_bus()`, `diagnostics.check_notification_daemon()`, `diagnostics.check_scheduler()`, `diagnostics.check_schedule()`, `diagnostics.run_checks() -> list[Check]`, `diagnostics.NOTIFICATION_HELP`, `cli.command_doctor(args)`.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_diagnostics.py`:
 
 ```python
-from linguapulse import daemon, diagnostics, notify, paths, store
+from linguapulse import __version__, cli, config, daemon, diagnostics, notify, paths, store
+
+PAST = "2020-01-01T09:00:00+00:00"
+FUTURE = "2099-01-01T09:00:00+00:00"
+
+
+def isolate_notifications(monkeypatch):
+    """Keep a check that runs everything away from the notification bus."""
+    monkeypatch.setattr(notify, "notify_send_path", lambda env=None: "/usr/bin/notify-send")
+    monkeypatch.setattr(
+        notify, "session_bus_address", lambda env=None: "unix:path=/run/user/1000/bus"
+    )
+    monkeypatch.setattr(notify, "notification_daemon", lambda env=None: "dunst")
+    monkeypatch.setattr(
+        diagnostics.shutil, "which", lambda name, path=None: "/usr/bin/busctl"
+    )
 
 
 def test_a_check_reports_its_name_and_detail():
@@ -4497,17 +4512,238 @@ def test_the_scheduler_check_reports_a_missing_scheduler(home):
     assert check.ok is False
 
 
-def test_every_check_has_a_name_and_a_detail(home):
+def test_every_check_has_a_name_and_a_detail(home, monkeypatch):
+    isolate_notifications(monkeypatch)
     for check in diagnostics.run_checks():
         assert check.name
         assert check.detail
+
+
+def test_run_checks_covers_the_installation(home, monkeypatch):
+    isolate_notifications(monkeypatch)
+    names = [check.name for check in diagnostics.run_checks()]
+    assert names == [
+        "paths",
+        "config",
+        "deck",
+        "state",
+        "notify-send",
+        "busctl",
+        "session bus",
+        "notification daemon",
+        "scheduler",
+        "schedule",
+    ]
+
+
+def test_the_paths_check_reports_an_unwritable_directory(home, monkeypatch):
+    def fail():
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(paths, "ensure_dirs", fail)
+    check = diagnostics.check_paths()
+    assert check.ok is False
+    assert "permission denied" in check.detail
+
+
+def test_the_deck_check_reports_a_file_that_is_not_json(home):
+    paths.deck_path().write_text("{", encoding="utf-8")
+    check = diagnostics.check_deck()
+    assert check.ok is False
+    assert "cannot be read" in check.detail
+
+
+def test_the_state_check_reports_an_empty_state(home):
+    check = diagnostics.check_state()
+    assert check.ok is True
+    assert "0 states" in check.detail
+
+
+def test_the_state_check_reports_the_scheduled_cards(home):
+    store.write_json(
+        paths.state_path(),
+        {"cards": {"hello": {"card_id": "hello", "due": FUTURE}}},
+    )
+    check = diagnostics.check_state()
+    assert check.ok is True
+    assert "1 state" in check.detail
+
+
+def test_the_state_check_fails_on_a_broken_state_file(home):
+    paths.state_path().write_text("{", encoding="utf-8")
+    check = diagnostics.check_state()
+    assert check.ok is False
+    assert "cannot be read" in check.detail
+
+
+def test_the_busctl_check_reports_a_missing_binary(monkeypatch):
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda name, path=None: None)
+    check = diagnostics.check_busctl()
+    assert check.ok is False
+    assert "busctl" in check.detail
+
+
+def test_the_busctl_check_reports_an_installed_binary(monkeypatch):
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda name, path=None: "/usr/bin/busctl")
+    check = diagnostics.check_busctl()
+    assert check.ok is True
+    assert "/usr/bin/busctl" in check.detail
+
+
+def test_the_notification_daemon_check_reports_an_unowned_bus_name(monkeypatch):
+    monkeypatch.setattr(notify, "notification_daemon", lambda env=None: "-")
+    check = diagnostics.check_notification_daemon()
+    assert check.ok is False
+    assert "no daemon" in check.detail
+
+
+def test_the_config_check_reports_the_defaults(home):
+    check = diagnostics.check_config()
+    assert check.ok is True
+    assert "defaults" in check.detail
+    assert "source en" in check.detail
+    assert "target ar" in check.detail
+
+
+def test_the_config_check_reports_the_effective_file(home):
+    config.save_config(config.Config(source_lang="fr", target_lang="zh", notify_enabled=False))
+    check = diagnostics.check_config()
+    assert check.ok is True
+    assert "source fr" in check.detail
+    assert "target zh" in check.detail
+    assert "notifications disabled" in check.detail
+
+
+def test_the_config_check_surfaces_a_rejected_file(home):
+    paths.config_path().write_text("{", encoding="utf-8")
+    check = diagnostics.check_config()
+    assert check.ok is False
+    assert "not valid JSON" in check.detail
+    assert "defaults" in check.detail
+
+
+def test_the_config_check_surfaces_a_rejected_value(home):
+    store.write_json(paths.config_path(), {"source_lang": "de", "target_lang": "ar"})
+    check = diagnostics.check_config()
+    assert check.ok is False
+    assert "source_lang 'de'" in check.detail
+    assert "source en" in check.detail
+
+
+def test_the_scheduler_check_reports_a_dead_process(home, monkeypatch):
+    daemon.write_pid()
+    monkeypatch.setattr(daemon, "scheduler_is_running", lambda path=None: False)
+    check = diagnostics.check_scheduler()
+    assert check.ok is False
+    assert "not running" in check.detail
+
+
+def test_the_schedule_check_reports_nothing_scheduled(home):
+    check = diagnostics.check_schedule()
+    assert check.ok is True
+    assert "nothing is scheduled" in check.detail
+
+
+def test_the_schedule_check_reports_the_next_wakeup(home):
+    store.write_json(
+        paths.deck_path(),
+        {
+            "cards": {
+                "hello": {
+                    "id": "hello",
+                    "term": "hello",
+                    "source_lang": "en",
+                    "translations": {"ar": "مرحبا"},
+                    "created_at": PAST,
+                }
+            }
+        },
+    )
+    store.write_json(
+        paths.state_path(),
+        {"cards": {"hello": {"card_id": "hello", "due": FUTURE}}},
+    )
+    check = diagnostics.check_schedule()
+    assert check.ok is True
+    assert "next wakeup" in check.detail
+    assert "2099" in check.detail
+
+
+def test_the_schedule_check_reports_a_due_card(home):
+    store.write_json(
+        paths.deck_path(),
+        {
+            "cards": {
+                "hello": {
+                    "id": "hello",
+                    "term": "hello",
+                    "source_lang": "en",
+                    "translations": {"ar": "مرحبا"},
+                    "created_at": PAST,
+                }
+            }
+        },
+    )
+    store.write_json(
+        paths.state_path(),
+        {"cards": {"hello": {"card_id": "hello", "due": PAST}}},
+    )
+    check = diagnostics.check_schedule()
+    assert check.ok is True
+    assert "due now" in check.detail
+
+
+def test_the_doctor_prints_the_version_and_the_checks(monkeypatch, capsys):
+    monkeypatch.setattr(
+        diagnostics, "run_checks", lambda: [diagnostics.Check("deck", True, "3 cards")]
+    )
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert f"lingua-pulse {__version__}" in out
+    assert "[ok] deck: 3 cards" in out
+
+
+def test_the_doctor_exits_with_one_when_a_check_fails(monkeypatch, capsys):
+    monkeypatch.setattr(
+        diagnostics,
+        "run_checks",
+        lambda: [diagnostics.Check("scheduler", False, "not running")],
+    )
+    assert cli.main(["doctor"]) == 1
+    assert "[FAIL] scheduler: not running" in capsys.readouterr().out
+
+
+def test_the_doctor_explains_how_to_diagnose_a_notification_failure(monkeypatch, capsys):
+    monkeypatch.setattr(diagnostics, "run_checks", lambda: [])
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "notify-send" in out
+    assert "busctl" in out
+    assert "DBUS_SESSION_BUS_ADDRESS" in out
+
+
+def test_status_reports_the_notifications_and_the_scheduler(home, capsys, monkeypatch):
+    monkeypatch.setattr(daemon, "scheduler_is_running", lambda path=None: False)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Notify:     enabled" in out
+    assert "Scheduler: not running" in out
+
+
+def test_status_reports_disabled_notifications_and_a_running_scheduler(home, capsys, monkeypatch):
+    config.save_config(config.Config(notify_enabled=False))
+    monkeypatch.setattr(daemon, "scheduler_is_running", lambda path=None: True)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Notify:     disabled" in out
+    assert "Scheduler: running" in out
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m pytest tests/test_diagnostics.py -v`
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'linguapulse.diagnostics'`.
+Expected: FAIL with `ImportError: cannot import name 'diagnostics' from 'linguapulse'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -4519,10 +4755,16 @@ Create `src/linguapulse/diagnostics.py`:
 from __future__ import annotations
 
 import os
-import sys
+import shutil
 from dataclasses import dataclass
 
-from . import daemon, models, notify, paths, store
+from . import config, daemon, models, notify, paths, scheduler, store
+
+NOTIFICATION_HELP = (
+    "run 'notify-send --app-name=linguapulse test hello' to test the notification itself",
+    "run 'busctl --user --no-pager list | grep org.freedesktop.Notifications' to find the daemon",
+    "in a systemd user service, make sure DBUS_SESSION_BUS_ADDRESS reaches the scheduler",
+)
 
 
 @dataclass(frozen=True)
@@ -4534,19 +4776,91 @@ class Check:
     detail: str
 
 
+def _counted(count: int, singular: str) -> str:
+    """Return a count with a correctly inflected noun."""
+    if count == 1:
+        return f"{count} {singular}"
+    return f"{count} {singular}s"
+
+
 def check_paths() -> Check:
     """Check that the data directories exist and are writable."""
     try:
         paths.ensure_dirs()
     except OSError as exc:
         return Check("paths", False, f"the data directory is not writable: {exc}")
-    return Check("paths", True, str(paths.data_dir()))
+    return Check(
+        "paths",
+        True,
+        f"data {paths.data_dir()}, config {paths.config_dir()}, state {paths.state_dir()}",
+    )
+
+
+def _config_summary(settings: config.Config) -> str:
+    """Describe the configuration that is in effect."""
+    notifications = "enabled" if settings.notify_enabled else "disabled"
+    return (
+        f"source {settings.source_lang}, target {settings.target_lang}, "
+        f"notifications {notifications}"
+    )
+
+
+def _rejected_config_fields(raw: dict[str, object], settings: config.Config) -> list[str]:
+    """Return the fields of the file that the loader replaced with a default."""
+    rejected: list[str] = []
+    for field_name, attribute in (
+        ("source_lang", settings.source_lang),
+        ("target_lang", settings.target_lang),
+    ):
+        if field_name not in raw:
+            continue
+        value = raw[field_name]
+        if not isinstance(value, str) or value.strip() != attribute:
+            rejected.append(f"{field_name} {value!r}")
+    if "notify_enabled" in raw:
+        value = raw["notify_enabled"]
+        if not isinstance(value, bool) or value != settings.notify_enabled:
+            rejected.append(f"notify_enabled {value!r}")
+    return rejected
+
+
+def check_config() -> Check:
+    """Check which configuration is in effect and whether the file was accepted."""
+    defaults = _config_summary(config.Config())
+    try:
+        raw = store.read_json(paths.config_path(), None)
+    except (OSError, ValueError) as exc:
+        return Check(
+            "config",
+            False,
+            f"the configuration file cannot be read: {exc}; the defaults are in effect: {defaults}",
+        )
+    if raw is None:
+        return Check("config", True, f"the defaults are in effect: {defaults}")
+    if not isinstance(raw, dict):
+        return Check(
+            "config",
+            False,
+            f"the configuration file is not a JSON object; the defaults are in effect: {defaults}",
+        )
+    settings = config.Config.from_dict(raw)
+    rejected = _rejected_config_fields(raw, settings)
+    if rejected:
+        return Check(
+            "config",
+            False,
+            f"{', '.join(rejected)} rejected; in effect: {_config_summary(settings)}",
+        )
+    return Check("config", True, f"in effect: {_config_summary(settings)}")
 
 
 def check_deck() -> Check:
     """Check that the deck file can be read and has no problems."""
     path = paths.deck_path()
-    raw = store.read_json(path, None)
+    try:
+        raw = store.read_json(path, None)
+    except (OSError, ValueError) as exc:
+        return Check("deck", False, f"the deck file cannot be read: {exc}")
     if raw is None:
         return Check("deck", True, "0 cards, no deck file yet")
     problems = models.validate_deck_raw(raw)
@@ -4556,12 +4870,32 @@ def check_deck() -> Check:
     return Check("deck", True, f"{count} cards, no problems")
 
 
+def check_state() -> Check:
+    """Check that the state file can be read and holds a schedule."""
+    path = paths.state_path()
+    try:
+        states = models.load_states(path)
+    except (OSError, TypeError, ValueError) as exc:
+        return Check("state", False, f"the state file cannot be read: {exc}")
+    if not path.exists():
+        return Check("state", True, "0 states, no state file yet")
+    return Check("state", True, f"{_counted(len(states), 'state')}, no problems")
+
+
 def check_notify_send() -> Check:
     """Check that notify-send is installed."""
     binary = notify.notify_send_path()
     if binary is None:
         return Check("notify-send", False, "notify-send was not found in PATH")
     return Check("notify-send", True, binary)
+
+
+def check_busctl() -> Check:
+    """Check that busctl is installed, so that the daemon can be identified."""
+    binary = shutil.which(notify.BUSCTL, path=os.environ.get("PATH") or "")
+    if binary is None:
+        return Check("busctl", False, "busctl was not found in PATH")
+    return Check("busctl", True, binary)
 
 
 def check_session_bus() -> Check:
@@ -4579,7 +4913,7 @@ def check_session_bus() -> Check:
 def check_notification_daemon() -> Check:
     """Check that a notification daemon owns the notifications bus name."""
     daemon_name = notify.notification_daemon()
-    if daemon_name is None:
+    if daemon_name is None or daemon_name == "-":
         return Check(
             "notification daemon",
             False,
@@ -4594,19 +4928,40 @@ def check_scheduler() -> Check:
     if pid is None:
         return Check("scheduler", False, "the scheduler is not running")
     if not daemon.scheduler_is_running():
-        return Check("scheduler", False, f"the scheduler process {pid} is gone")
+        return Check("scheduler", False, f"the scheduler is not running (process {pid} is gone)")
     return Check("scheduler", True, f"running with process {pid}")
+
+
+def check_schedule() -> Check:
+    """Check when the scheduler will wake up next."""
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except (OSError, TypeError, ValueError) as exc:
+        return Check("schedule", False, f"the deck or state file cannot be read: {exc}")
+    moment = models.now_utc()
+    pending = scheduler.pending_occurrences(cards, states, moment)
+    if pending:
+        return Check("schedule", True, f"{_counted(len(pending), 'card')} due now")
+    upcoming = scheduler.next_wakeup(cards, states, moment)
+    if upcoming is None:
+        return Check("schedule", True, "nothing is scheduled")
+    return Check("schedule", True, f"next wakeup at {upcoming.isoformat()}")
 
 
 def run_checks() -> list[Check]:
     """Run every diagnostic check."""
     return [
         check_paths(),
+        check_config(),
         check_deck(),
+        check_state(),
         check_notify_send(),
+        check_busctl(),
         check_session_bus(),
         check_notification_daemon(),
         check_scheduler(),
+        check_schedule(),
     ]
 ```
 
@@ -4614,7 +4969,7 @@ def run_checks() -> list[Check]:
 
 Run: `python3 -m pytest tests/test_diagnostics.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 33 tests.
 
 - [ ] **Step 5: Add the doctor command**
 
@@ -4635,12 +4990,18 @@ Add the command implementation:
 ```python
 def command_doctor(args: argparse.Namespace) -> int:
     """Run every diagnostic check and report the result."""
+    print(f"lingua-pulse {__version__}")
+    print()
     failed = 0
     for check in diagnostics.run_checks():
         mark = "ok" if check.ok else "FAIL"
         print(f"[{mark}] {check.name}: {check.detail}")
         if not check.ok:
             failed += 1
+    print()
+    print("To diagnose a notification failure:")
+    for line in diagnostics.NOTIFICATION_HELP:
+        print(f"  {line}")
     return 1 if failed else 0
 ```
 
@@ -4663,7 +5024,7 @@ In `command_status` of `src/linguapulse/cli.py`, add these lines before the fina
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test.
+Expected: PASS, 216 tests, every test of every task.
 
 - [ ] **Step 8: Commit (only when the user explicitly requested commits)**
 
