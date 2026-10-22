@@ -1131,7 +1131,7 @@ def validate_deck_raw(raw: Mapping[str, Any]) -> list[str]:
 
 Run: `python3 -m pytest tests/test_models.py -v`
 
-Expected: PASS, 17 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
