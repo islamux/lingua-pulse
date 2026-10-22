@@ -3332,7 +3332,7 @@ git commit -m "feat: add the review commands to the cli"
 
 **Interfaces:**
 - Consumes: `config` from Task 6, `models` from Task 4, `paths` from Task 3, `srs` from Task 5, `text.normalize` from Task 2.
-- Produces: `cli.command_add(args)`, `cli.command_list(args)`, `cli.command_seed(args)`, `cli.command_config(args)`, `cli.seed_cards(limit=None) -> list[models.Card]`.
+- Produces: `cli.command_add(args)`, `cli.command_list(args)`, `cli.command_seed(args)`, `cli.command_config(args)`, `cli.seed_cards(limit=None) -> list[models.Card]`, `cli.load_deck_and_states() -> tuple[dict[str, models.Card], dict[str, models.CardState]] | None`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3341,6 +3341,7 @@ Create `tests/test_cli_deck.py`:
 ```python
 import json
 
+from conftest import write_broken_deck
 from linguapulse import cli, models, paths
 
 
@@ -3382,6 +3383,15 @@ def test_add_creates_a_due_state(home, capsys):
     assert len(states) == 1
 
 
+def test_add_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["add", "--term", "new", "--lang", "ar", "--text", "جديد"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert captured.out == ""
+    assert paths.deck_path().read_text(encoding="utf-8").startswith('{"version": 1, "cards": {')
+
+
 def test_list_prints_the_cards(home, capsys):
     cli.main(["add", "--term", "hello", "--lang", "ar", "--text", "مرحبا"])
     capsys.readouterr()
@@ -3389,6 +3399,14 @@ def test_list_prints_the_cards(home, capsys):
     out = capsys.readouterr().out
     assert "hello" in out
     assert "مرحبا" in out
+
+
+def test_list_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["list"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert captured.out == ""
 
 
 def test_seed_adds_the_bundled_cards(home, capsys):
@@ -3403,6 +3421,14 @@ def test_seed_does_not_duplicate_cards(home, capsys):
     assert cli.main(["seed"]) == 0
     assert "0" in capsys.readouterr().out
     assert len(models.load_deck(paths.deck_path())) == len(cli.seed_cards())
+
+
+def test_seed_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["seed"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert captured.out == ""
 
 
 def test_the_bundled_seed_cards_are_valid(home):
@@ -3422,13 +3448,30 @@ def test_config_updates_the_settings(home, capsys):
     capsys.readouterr()
     assert cli.main(["config"]) == 0
     assert "zh" in capsys.readouterr().out
+
+
+def test_config_rejects_an_unknown_language(home, capsys):
+    assert cli.main(["config", "--target-lang", "zh"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--source-lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "error: unknown language 'xx', the supported languages are ar, en, es, fr, tr, zh\n"
+    )
+    assert captured.out == ""
+    assert cli.main(["config", "--target-lang", "yy"]) == 2
+    assert "unknown language 'yy'" in capsys.readouterr().err
+    assert cli.main(["config"]) == 0
+    out = capsys.readouterr().out
+    assert "source_lang = en" in out
+    assert "target_lang = zh" in out
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m pytest tests/test_cli_deck.py -v`
 
-Expected: FAIL because the parser does not know the `add` command yet.
+Expected: FAIL, 15 tests, because the parser does not know the `add` command yet.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -3542,23 +3585,31 @@ Create `src/linguapulse/seed_deck.json`:
 }
 ```
 
-Extend `src/linguapulse/cli.py`:
+Extend `src/linguapulse/cli.py`.
 
-Add these imports at the top:
+The import header becomes:
 
 ```python
+import argparse
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from importlib import resources
+
+from . import __version__, config, models, paths, review, srs, store, text
 ```
 
-Add these helpers after `plural`:
+Add these helpers after `plural`, and make `load_session` load the deck and the states through `load_deck_and_states`, so every command that reads them reports a broken file the same way:
 
 ```python
 def seed_cards(limit: int | None = None) -> list[models.Card]:
     """Return the bundled seed cards."""
-    raw = resources.files("linguapulse").joinpath("seed_deck.json").read_text(encoding="utf-8")
+    raw = (
+        resources.files("linguapulse")
+        .joinpath("seed_deck.json")
+        .read_text(encoding="utf-8")
+    )
     document = json.loads(raw)
     cards = [models.Card.from_dict(entry) for entry in document.get("cards", {}).values()]
     return cards[:limit] if limit else cards
@@ -3567,16 +3618,29 @@ def seed_cards(limit: int | None = None) -> list[models.Card]:
 def card_id_for(term: str) -> str:
     """Return a stable identifier for a term."""
     normalized = text.normalize(term).strip().lower()
-    if normalized and all(character.isascii() and (character.isalnum() or character in "-_") for character in normalized):
+    plain = all(
+        character.isascii() and (character.isalnum() or character in "-_")
+        for character in normalized
+    )
+    if normalized and plain:
         return normalized.replace(" ", "-")
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:10]
     return f"card-{digest}"
-```
 
-Add `text` to the package imports, so that the line reads:
 
-```python
-from . import __version__, config, models, paths, review, srs, store, text
+def load_deck_and_states() -> tuple[dict[str, models.Card], dict[str, models.CardState]] | None:
+    """Load the deck and the states.
+
+    None is returned and the problem is reported on stderr when the deck file
+    or the state file cannot be read or holds a malformed value.
+    """
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except (ValueError, TypeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
+    return cards, states
 ```
 
 Register the commands in `build_parser`:
@@ -3586,8 +3650,12 @@ Register the commands in `build_parser`:
     add.add_argument("--id", help="identifier of the card")
     add.add_argument("--term", required=True, help="the word to learn")
     add.add_argument("--source-lang", help="language of the term")
-    add.add_argument("--lang", action="append", required=True, metavar="LANG", help="language of a translation")
-    add.add_argument("--text", action="append", required=True, metavar="TEXT", help="a translation")
+    add.add_argument(
+        "--lang", action="append", required=True, metavar="LANG", help="language of a translation"
+    )
+    add.add_argument(
+        "--text", action="append", required=True, metavar="TEXT", help="a translation"
+    )
     add.add_argument("--pinyin", help="pinyin of the chinese translation")
     add.add_argument("--note", help="a note that is shown with the answer")
     add.add_argument("--tag", action="append", default=[], help="a tag for the card")
@@ -3602,11 +3670,15 @@ Register the commands in `build_parser`:
     config_parser = commands.add_parser("config", help="show or change the preferences")
     config_parser.add_argument("--source-lang", help="language of the term")
     config_parser.add_argument("--target-lang", help="language that is shown first")
-    config_parser.add_argument("--notify", dest="notify", action="store_true", default=None, help="enable notifications")
-    config_parser.add_argument("--no-notify", dest="notify", action="store_false", help="disable notifications")
+    config_parser.add_argument(
+        "--notify", dest="notify", action="store_true", default=None, help="enable notifications"
+    )
+    config_parser.add_argument(
+        "--no-notify", dest="notify", action="store_false", help="disable notifications"
+    )
 ```
 
-Add the command implementations:
+Add the command implementations. `command_config` validates `--source-lang` and `--target-lang` with `resolve_language` before saving anything; `command_add`, `command_list` and `command_seed` load the deck and the states through `load_deck_and_states`, so a broken file is reported on stderr and returns 1:
 
 ```python
 def command_add(args: argparse.Namespace) -> int:
@@ -3615,10 +3687,13 @@ def command_add(args: argparse.Namespace) -> int:
     if len(args.lang) != len(args.text):
         print("error: every --lang needs exactly one --text", file=sys.stderr)
         return 2
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, states = loaded
     settings = config.load_config()
     source_lang = args.source_lang or settings.source_lang
     card_id = args.id or card_id_for(args.term)
-    deck = models.load_deck(paths.deck_path())
     if card_id in deck:
         print(f"error: a card with the id '{card_id}' already exists", file=sys.stderr)
         return 1
@@ -3637,7 +3712,6 @@ def command_add(args: argparse.Namespace) -> int:
     )
     deck[card.id] = card
     models.save_deck(paths.deck_path(), deck)
-    states = models.load_states(paths.state_path())
     if card.id not in states:
         states[card.id] = srs.new_state(card.id, models.now_utc())
         models.save_states(paths.state_path(), states)
@@ -3648,7 +3722,10 @@ def command_add(args: argparse.Namespace) -> int:
 def command_list(args: argparse.Namespace) -> int:
     """List the cards of the deck."""
     paths.ensure_dirs()
-    deck = models.load_deck(paths.deck_path())
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, _ = loaded
     if not deck:
         print("The deck is empty. Add a card with 'linguapulse add'.")
         return 0
@@ -3666,8 +3743,10 @@ def command_list(args: argparse.Namespace) -> int:
 def command_seed(args: argparse.Namespace) -> int:
     """Add the bundled example cards to the deck."""
     paths.ensure_dirs()
-    deck = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, states = loaded
     added = 0
     for card in seed_cards(args.limit):
         if card.id in deck:
@@ -3686,12 +3765,18 @@ def command_config(args: argparse.Namespace) -> int:
     """Show or change the preferences."""
     paths.ensure_dirs()
     settings = config.load_config()
+    source = resolve_language(args.source_lang, settings.source_lang)
+    if source is None:
+        return 2
+    target = resolve_language(args.target_lang, settings.target_lang)
+    if target is None:
+        return 2
     changed = False
     if args.source_lang:
-        settings.source_lang = args.source_lang
+        settings.source_lang = source
         changed = True
     if args.target_lang:
-        settings.target_lang = args.target_lang
+        settings.target_lang = target
         changed = True
     if args.notify is not None:
         settings.notify_enabled = args.notify
@@ -3724,7 +3809,9 @@ Register the new commands in the dispatch table of `main`:
 
 Run: `python3 -m pytest tests/test_cli_deck.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 15 tests. The whole suite passes with 167 tests:
+
+Run: `python3 -m pytest`
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
