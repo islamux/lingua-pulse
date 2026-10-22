@@ -43,6 +43,28 @@ def test_load_deck_rejects_a_file_without_cards(tmp_path):
         raise AssertionError("expected a ValueError")
 
 
+def test_load_deck_rejects_a_null_card(tmp_path):
+    target = tmp_path / "deck.json"
+    target.write_text('{"cards": {"hello": null}}', encoding="utf-8")
+    try:
+        models.load_deck(target)
+    except ValueError as exc:
+        assert "not a valid deck file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
+def test_load_deck_rejects_a_card_that_is_not_an_object(tmp_path):
+    target = tmp_path / "deck.json"
+    target.write_text('{"cards": {"hello": "a card"}}', encoding="utf-8")
+    try:
+        models.load_deck(target)
+    except ValueError as exc:
+        assert "not a valid deck file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
 def test_card_state_round_trip():
     state = models.CardState(
         card_id="hello",
@@ -55,6 +77,56 @@ def test_card_state_round_trip():
 def test_card_state_due_dt_parses_the_timestamp():
     state = models.CardState(card_id="hello", due="2026-10-22T09:00:00+00:00")
     assert state.due_dt() == datetime(2026, 10, 22, 9, 0, tzinfo=timezone.utc)
+
+
+def test_load_states_returns_an_empty_mapping_when_the_file_is_missing(tmp_path):
+    assert models.load_states(tmp_path / "state.json") == {}
+
+
+def test_save_and_load_states_round_trip(tmp_path):
+    states = {
+        "hello": models.CardState(
+            card_id="hello",
+            due="2026-10-22T09:00:00+00:00",
+            handled_due="2026-10-21T09:00:00+00:00",
+        )
+    }
+    target = tmp_path / "state.json"
+    models.save_states(target, states)
+    assert models.load_states(target) == states
+
+
+def test_load_states_rejects_a_file_without_cards(tmp_path):
+    target = tmp_path / "state.json"
+    target.write_text('{"version": 1}', encoding="utf-8")
+    try:
+        models.load_states(target)
+    except ValueError as exc:
+        assert "is not a valid state file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
+def test_load_states_rejects_a_null_card(tmp_path):
+    target = tmp_path / "state.json"
+    target.write_text('{"cards": {"hello": null}}', encoding="utf-8")
+    try:
+        models.load_states(target)
+    except ValueError as exc:
+        assert "is not a valid state file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
+def test_load_states_rejects_a_card_that_is_not_an_object(tmp_path):
+    target = tmp_path / "state.json"
+    target.write_text('{"cards": {"hello": "a card"}}', encoding="utf-8")
+    try:
+        models.load_states(target)
+    except ValueError as exc:
+        assert "is not a valid state file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
 
 
 def test_validate_accepts_a_correct_card():
@@ -72,6 +144,13 @@ def test_validate_reports_a_missing_pinyin_for_chinese():
 def test_validate_reports_pinyin_without_tone_marks():
     card = make_card().to_dict()
     card["pinyin"] = "ni hao"
+    problems = models.validate_deck_raw({"cards": {"hello": card}})
+    assert any("no tone marks" in problem for problem in problems)
+
+
+def test_validate_reports_pinyin_with_a_bare_umlaut_as_having_no_tone_marks():
+    card = make_card().to_dict()
+    card["pinyin"] = "lü"
     problems = models.validate_deck_raw({"cards": {"hello": card}})
     assert any("no tone marks" in problem for problem in problems)
 

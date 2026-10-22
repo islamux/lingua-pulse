@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import store
 
 SUPPORTED_LANGUAGES = ("ar", "en", "es", "fr", "tr", "zh")
-PINYIN_TONE_MARKS = frozenset("āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜüńňǹḿ")
+PINYIN_TONE_MARKS = frozenset("āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ")
 
 
 def now_utc() -> datetime:
@@ -191,6 +191,10 @@ def load_deck(path: Path) -> dict[str, Card]:
         raise ValueError(f"{path} is not a valid deck file")
     deck: dict[str, Card] = {}
     for card_id, card_raw in cards.items():
+        if not isinstance(card_raw, Mapping):
+            raise ValueError(
+                f"{path} is not a valid deck file: card {card_id!r} is not an object"
+            )
         data = dict(card_raw)
         data.setdefault("id", card_id)
         card = Card.from_dict(data)
@@ -216,6 +220,10 @@ def load_states(path: Path) -> dict[str, CardState]:
         raise ValueError(f"{path} is not a valid state file")
     states: dict[str, CardState] = {}
     for card_id, state_raw in cards.items():
+        if not isinstance(state_raw, Mapping):
+            raise ValueError(
+                f"{path} is not a valid state file: card {card_id!r} is not an object"
+            )
         data = dict(state_raw)
         data.setdefault("card_id", card_id)
         states[str(card_id)] = CardState.from_dict(data)
