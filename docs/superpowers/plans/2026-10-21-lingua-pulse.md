@@ -5630,9 +5630,14 @@ occurrence was handled and computes the next wake up.
 
 ## How the notifications behave
 
-* One notification per due card, no retries.
+* One notification per due moment, no retries.
 * When the notification cannot be delivered, the problem is written to the log
   of the service and the reason is actionable.
+
+  If no notification appears, run `linguapulse doctor`: when the notification
+  infrastructure is missing it prints three commands that diagnose the failure,
+  a direct `notify-send` test, a `busctl` lookup of the notification daemon and
+  the check that `DBUS_SESSION_BUS_ADDRESS` reaches the scheduler.
 * Identical failures are logged once and then only every tenth time.
 
 ## Files
@@ -5646,8 +5651,8 @@ occurrence was handled and computes the next wake up.
 | `~/.local/state/linguapulse/daemon.lock` | The lock that keeps one scheduler. |
 | `~/.local/state/linguapulse/daemon.pid` | The process id of the scheduler. |
 
-Set `LINGUAPULSE_HOME` to move every file into one directory, which is handy
-for tests.
+Set `LINGUAPULSE_HOME` to move the data, config and state directories under
+one root, which is handy for tests.
 
 ## Installation of the service
 
@@ -5659,7 +5664,8 @@ systemctl --user start linguapulse.service
 `install` writes `~/.config/systemd/user/linguapulse.service`, enables it and
 adds a marked block to `~/.config/herbstluftwm/autostart`. Your own autostart
 file is never overwritten and a backup is written to
-`autostart.linguapulse.bak`.
+`autostart.linguapulse.bak`. Undo it with `linguapulse uninstall`, which removes
+the marked block and the unit again.
 
 ## Development
 
@@ -5678,7 +5684,7 @@ Expected: PASS, 231 tests, every test of every task.
 
 - [ ] **Step 3: Check the manual pages of the CLI**
 
-Run: `python3 -m linguapulse --help` and `python3 -m linguapulse next --help`
+Run: `PYTHONPATH=src python3 -m linguapulse --help` and `PYTHONPATH=src python3 -m linguapulse next --help`
 
 Expected: the help text lists every command and every option.
 
@@ -5686,14 +5692,14 @@ Expected: the help text lists every command and every option.
 
 ```bash
 export LINGUAPULSE_HOME="$(mktemp -d)"
-python3 -m linguapulse seed
-python3 -m linguapulse list
-python3 -m linguapulse show --reveal
-python3 -m linguapulse next good
-python3 -m linguapulse history
-python3 -m linguapulse status
-python3 -m linguapulse validate
-python3 -m linguapulse doctor
+PYTHONPATH=src python3 -m linguapulse seed
+PYTHONPATH=src python3 -m linguapulse list
+PYTHONPATH=src python3 -m linguapulse show --reveal
+PYTHONPATH=src python3 -m linguapulse next good
+PYTHONPATH=src python3 -m linguapulse history
+PYTHONPATH=src python3 -m linguapulse status
+PYTHONPATH=src python3 -m linguapulse validate
+PYTHONPATH=src python3 -m linguapulse doctor
 ```
 
 Expected: the seed adds the bundled cards, `show` prints the due card, `next
