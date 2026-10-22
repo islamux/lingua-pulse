@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from linguapulse import models, paths
@@ -54,3 +56,9 @@ def write_malformed_states():
 def write_states(states):
     """Write card states to the state file."""
     models.save_states(paths.state_path(), states)
+
+
+@pytest.fixture()
+def moment():
+    """Return a fixed point in time for the scheduler tests."""
+    return datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)

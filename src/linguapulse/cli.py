@@ -13,7 +13,7 @@ import sys
 from datetime import datetime, timezone
 from importlib import resources
 
-from . import __version__, config, models, paths, review, srs, store, text
+from . import __version__, config, daemon, models, paths, review, srs, store, text
 
 
 def format_local(moment: datetime) -> str:
@@ -193,6 +193,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-notify", dest="notify", action="store_false", help="disable notifications"
     )
 
+    commands.add_parser("daemon", help="run the scheduler in the foreground")
+
     return parser
 
 
@@ -256,6 +258,7 @@ def command_next(args: argparse.Namespace) -> int:
         },
     )
     print(f"Graded '{args.grade}'. Next review {format_local(updated.due_dt())}.")
+    daemon.signal_scheduler()
     return 0
 
 
@@ -361,6 +364,7 @@ def command_add(args: argparse.Namespace) -> int:
         states[card.id] = srs.new_state(card.id, models.now_utc())
         models.save_states(paths.state_path(), states)
     print(f"Added '{card.id}' ({card.source_lang} -> {', '.join(sorted(card.translations))}).")
+    daemon.signal_scheduler()
     return 0
 
 
@@ -434,6 +438,11 @@ def command_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_daemon(args: argparse.Namespace) -> int:
+    """Run the scheduler in the foreground."""
+    return daemon.run()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the command line interface and return the process exit code."""
     parser = build_parser()
@@ -451,5 +460,6 @@ def main(argv: list[str] | None = None) -> int:
         "list": command_list,
         "seed": command_seed,
         "config": command_config,
+        "daemon": command_daemon,
     }
     return handlers[args.command](args)
