@@ -13,7 +13,7 @@ import sys
 from datetime import datetime, timezone
 from importlib import resources
 
-from . import __version__, config, daemon, models, paths, review, srs, store, text
+from . import __version__, config, daemon, diagnostics, models, paths, review, srs, store, text
 
 
 def format_local(moment: datetime) -> str:
@@ -194,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     commands.add_parser("daemon", help="run the scheduler in the foreground")
+    commands.add_parser("doctor", help="check the installation")
 
     return parser
 
@@ -298,6 +299,8 @@ def command_status(args: argparse.Namespace) -> int:
         print(f"Next due:  {format_local(when)}  ({card.id})")
     print(f"Languages: source {settings.source_lang}, target {settings.target_lang}")
     print(f"Time zone: {models.local_zone()}")
+    print(f"Notify:     {'enabled' if settings.notify_enabled else 'disabled'}")
+    print(f"Scheduler: {'running' if daemon.scheduler_is_running() else 'not running'}")
     return 0
 
 
@@ -443,6 +446,23 @@ def command_daemon(args: argparse.Namespace) -> int:
     return daemon.run()
 
 
+def command_doctor(args: argparse.Namespace) -> int:
+    """Run every diagnostic check and report the result."""
+    print(f"lingua-pulse {__version__}")
+    print()
+    failed = 0
+    for check in diagnostics.run_checks():
+        mark = "ok" if check.ok else "FAIL"
+        print(f"[{mark}] {check.name}: {check.detail}")
+        if not check.ok:
+            failed += 1
+    print()
+    print("To diagnose a notification failure:")
+    for line in diagnostics.NOTIFICATION_HELP:
+        print(f"  {line}")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the command line interface and return the process exit code."""
     parser = build_parser()
@@ -461,5 +481,6 @@ def main(argv: list[str] | None = None) -> int:
         "seed": command_seed,
         "config": command_config,
         "daemon": command_daemon,
+        "doctor": command_doctor,
     }
     return handlers[args.command](args)
