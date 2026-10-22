@@ -70,7 +70,7 @@ def test_the_interval_is_capped():
     state = srs.new_state("hello", NOW)
     for _ in range(30):
         state = srs.apply_grade(state, "easy", NOW, ZONE)
-    assert state.interval_days <= srs.MAX_INTERVAL_DAYS
+    assert state.interval_days == srs.MAX_INTERVAL_DAYS
 
 
 def test_grading_clears_the_handled_occurrence():
@@ -90,3 +90,27 @@ def test_a_day_interval_keeps_the_local_time_of_day_across_a_dst_change():
     before = datetime(2026, 3, 28, 9, 0, tzinfo=timezone.utc)
     state = srs.apply_grade(srs.new_state("hello", before), "good", before, zone)
     assert state.due_dt().astimezone(zone).strftime("%Y-%m-%d %H:%M") == "2026-03-29 10:00"
+
+
+def test_apply_grade_does_not_mutate_the_input_state():
+    state = srs.new_state("hello", NOW)
+    before = (
+        state.due,
+        state.interval_days,
+        state.ease,
+        state.reps,
+        state.lapses,
+        state.handled_due,
+        state.notifiable,
+    )
+    _ = srs.apply_grade(state, "good", NOW, ZONE)
+    after = (
+        state.due,
+        state.interval_days,
+        state.ease,
+        state.reps,
+        state.lapses,
+        state.handled_due,
+        state.notifiable,
+    )
+    assert after == before
