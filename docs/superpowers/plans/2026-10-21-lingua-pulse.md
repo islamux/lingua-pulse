@@ -5674,7 +5674,7 @@ The tests run from the checkout, no installation is needed.
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test of every task.
+Expected: PASS, 231 tests, every test of every task.
 
 - [ ] **Step 3: Check the manual pages of the CLI**
 
