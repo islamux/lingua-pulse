@@ -50,10 +50,33 @@ def test_due_cards_holds_a_relearn_card():
     assert [card.id for card in review.due_cards(cards, states, NOW)] == ["hello"]
 
 
+def test_a_card_created_in_the_future_is_not_due():
+    cards = {"hello": make_card(created_at="2026-10-21T10:00:00+00:00")}
+    assert review.due_cards(cards, {}, NOW) == []
+    card, when = review.next_due(cards, {}, NOW)
+    assert card.id == "hello"
+    assert when == datetime(2026, 10, 21, 10, 0, tzinfo=timezone.utc)
+
+
+def test_current_card_returns_the_most_overdue_card():
+    cards = {"later": make_card("later"), "earlier": make_card("earlier")}
+    states = {
+        "later": state_for("later", "2026-10-21T08:50:00+00:00"),
+        "earlier": state_for("earlier", "2026-10-21T08:00:00+00:00"),
+    }
+    assert review.current_card(cards, states, NOW).id == "earlier"
+
+
 def test_current_card_returns_none_when_nothing_is_due():
     cards = {"hello": make_card()}
     states = {"hello": state_for("hello", "2026-10-21T10:00:00+00:00")}
     assert review.current_card(cards, states, NOW) is None
+
+
+def test_next_due_is_none_when_nothing_is_scheduled():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:00:00+00:00")}
+    assert review.next_due(cards, states, NOW) is None
 
 
 def test_next_due_reports_the_soonest_future_card():
@@ -93,6 +116,23 @@ def test_render_card_shows_the_pinyin():
 def test_render_card_puts_the_requested_language_first():
     output = review.render_card(make_card(), reveal=True, target_lang="zh")
     assert output.index("zh:") < output.index("ar:")
+
+
+def test_render_card_falls_back_to_the_sorted_languages():
+    output = review.render_card(make_card(), reveal=True, target_lang="fr")
+    assert output.index("ar:") < output.index("zh:")
+
+
+def test_render_card_isolates_a_right_to_left_id():
+    output = review.render_card(make_card(card_id="مرحبا"))
+    assert output.splitlines()[0] == "⁧مرحبا⁩  [greetings]"
+
+
+def test_render_card_isolates_right_to_left_tags():
+    card = make_card()
+    card.tags = ["تحية"]
+    output = review.render_card(card)
+    assert output.splitlines()[0] == "hello  [⁧تحية⁩]"
 
 
 def test_render_card_shows_the_position_and_the_id():

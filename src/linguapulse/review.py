@@ -8,21 +8,33 @@ from typing import Mapping
 from . import models, scheduler, text
 
 
+def _due_entries(
+    cards: Mapping[str, models.Card],
+    states: Mapping[str, models.CardState],
+    moment: datetime,
+) -> list[tuple[datetime, str, models.Card]]:
+    """Return the due time, the id and the card of every card, the earliest due first.
+
+    The card id breaks the tie, so two cards that are due at the same moment always
+    keep the same order.
+    """
+    entries = [
+        (scheduler.occurrence_due(card, states.get(card_id), moment), card_id, card)
+        for card_id, card in cards.items()
+    ]
+    entries.sort(key=lambda entry: (entry[0], entry[1]))
+    return entries
+
+
 def due_cards(
     cards: Mapping[str, models.Card],
     states: Mapping[str, models.CardState],
     moment: datetime,
 ) -> list[models.Card]:
     """Return the cards that are due, the most overdue one first."""
-    entries: list[tuple[datetime, str, models.Card]] = []
-    for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        due = scheduler.occurrence_due(card, state, moment)
-        if due <= moment:
-            entries.append((due, card_id, card))
-    entries.sort(key=lambda entry: (entry[0], entry[1]))
-    return [entry[2] for entry in entries]
+    return [
+        card for due, _, card in _due_entries(cards, states, moment) if due <= moment
+    ]
 
 
 def current_card(
@@ -31,8 +43,10 @@ def current_card(
     moment: datetime,
 ) -> models.Card | None:
     """Return the card to review next, or None when nothing is due."""
-    due = due_cards(cards, states, moment)
-    return due[0] if due else None
+    for due, _, card in _due_entries(cards, states, moment):
+        if due <= moment:
+            return card
+    return None
 
 
 def next_due(
@@ -41,17 +55,10 @@ def next_due(
     moment: datetime,
 ) -> tuple[models.Card, datetime] | None:
     """Return the soonest card that is not due yet."""
-    entries: list[tuple[datetime, str, models.Card]] = []
-    for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        due = scheduler.occurrence_due(card, state, moment)
+    for due, _, card in _due_entries(cards, states, moment):
         if due > moment:
-            entries.append((due, card_id, card))
-    if not entries:
-        return None
-    entries.sort(key=lambda entry: (entry[0], entry[1]))
-    return entries[0][2], entries[0][0]
+            return card, due
+    return None
 
 
 def render_card(
@@ -64,11 +71,13 @@ def render_card(
 ) -> str:
     """Render a card for the terminal."""
     lines: list[str] = []
-    heading = card.id
+    identifier = text.isolate(card.id)
+    heading = identifier
     if index is not None and total is not None:
-        heading = f"{index} of {total}  ({card.id})"
+        heading = f"{index} of {total}  ({identifier})"
     if card.tags:
-        heading = f"{heading}  [{', '.join(card.tags)}]"
+        tags = ", ".join(text.isolate(tag) for tag in card.tags)
+        heading = f"{heading}  [{tags}]"
     lines.append(heading)
     lines.append("")
     lines.append(f"{card.source_lang}: {text.isolate(card.term)}")
