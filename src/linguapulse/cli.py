@@ -7,14 +7,32 @@ entry to the parser and one entry to the dispatch table.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+import sys
+from datetime import datetime, timezone
 
 from . import __version__, config, models, paths, review, srs, store
 
 
 def format_local(moment: datetime) -> str:
-    """Format a timestamp in the local time zone."""
+    """Format a timestamp in the local time zone.
+
+    A timestamp without a time zone is read as UTC, the way `models.parse_iso`
+    reads it, so that the two agree on what a naive timestamp means.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(models.local_zone()).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def local_stamp(value: str | None) -> str:
+    """Format a stored timestamp in the local time zone.
+
+    A timestamp that cannot be parsed is shown the way it is stored.
+    """
+    moment = models.safe_parse_iso(value or "")
+    if moment is None:
+        return value or "?"
+    return format_local(moment)
 
 
 def plural(count: int, singular: str, plural_form: str | None = None) -> str:
@@ -22,6 +40,59 @@ def plural(count: int, singular: str, plural_form: str | None = None) -> str:
     if count == 1:
         return f"{count} {singular}"
     return f"{count} {plural_form or singular + 's'}"
+
+
+def load_session() -> tuple[
+    config.Config,
+    dict[str, models.Card],
+    dict[str, models.CardState],
+    datetime,
+] | None:
+    """Load the configuration, the deck, the states and the current moment.
+
+    None is returned and the problem is reported on stderr when the deck file
+    or the state file cannot be read.
+    """
+    paths.ensure_dirs()
+    settings = config.load_config()
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
+    return settings, cards, states, models.now_utc()
+
+
+def resolve_language(language: str | None, fallback: str) -> str | None:
+    """Return the language to show first, or None when it is not supported.
+
+    The problem is reported on stderr when the requested language is unknown.
+    """
+    if language is None:
+        return fallback
+    if language in models.SUPPORTED_LANGUAGES:
+        return language
+    supported = ", ".join(models.SUPPORTED_LANGUAGES)
+    print(
+        f"error: unknown language {language!r}, the supported languages are {supported}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def report_nothing_due(
+    cards: dict[str, models.Card],
+    states: dict[str, models.CardState],
+    moment: datetime,
+) -> None:
+    """Report that no card is due and name the next scheduled card."""
+    upcoming = review.next_due(cards, states, moment)
+    if upcoming is None:
+        print("Nothing is due right now, and no card is scheduled.")
+    else:
+        _, when = upcoming
+        print(f"Nothing is due right now. Next card at {format_local(when)}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,22 +126,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def command_show(args: argparse.Namespace) -> int:
     """Print the cards that are due."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
+    target = resolve_language(args.lang, settings.target_lang)
+    if target is None:
+        return 2
     due = review.due_cards(cards, states, moment)
     if not due:
-        upcoming = review.next_due(cards, states, moment)
-        if upcoming is None:
-            print("Nothing is due right now, and no card is scheduled.")
-        else:
-            _, when = upcoming
-            print(f"Nothing is due right now. Next card at {format_local(when)}.")
+        report_nothing_due(cards, states, moment)
         return 0
     count = max(1, args.count)
-    target = args.lang or settings.target_lang
     shown = due[:count]
     for index, card in enumerate(shown, start=1):
         print(
@@ -88,22 +155,18 @@ def command_show(args: argparse.Namespace) -> int:
 
 def command_next(args: argparse.Namespace) -> int:
     """Grade the card that is due and record the review."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
+    target = resolve_language(args.lang, settings.target_lang)
+    if target is None:
+        return 2
     card = review.current_card(cards, states, moment)
     if card is None:
-        upcoming = review.next_due(cards, states, moment)
-        if upcoming is None:
-            print("Nothing is due right now, and no card is scheduled.")
-        else:
-            _, when = upcoming
-            print(f"Nothing is due right now. Next card at {format_local(when)}.")
+        report_nothing_due(cards, states, moment)
         return 0
     state = states.get(card.id) or srs.new_state(card.id, moment)
-    target = args.lang or settings.target_lang
     print(review.render_card(card, target_lang=target, reveal=not args.hide))
     print()
     updated = srs.apply_grade(state, args.grade, moment)
@@ -135,19 +198,18 @@ def command_history(args: argparse.Namespace) -> int:
         return 0
     for entry in entries:
         print(
-            f"{entry.get('ts', '?')}  {entry.get('card_id', '?')}  "
-            f"{entry.get('grade', '?')}  -> {entry.get('due', '?')}"
+            f"{local_stamp(entry.get('ts'))}  {entry.get('card_id', '?')}  "
+            f"{entry.get('grade', '?')}  -> {local_stamp(entry.get('due'))}"
         )
     return 0
 
 
 def command_status(args: argparse.Namespace) -> int:
     """Print the deck, the schedule and the local configuration."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
     due = review.due_cards(cards, states, moment)
     upcoming = review.next_due(cards, states, moment)
     print(f"lingua-pulse {__version__}")
@@ -167,7 +229,12 @@ def command_status(args: argparse.Namespace) -> int:
 def command_validate(args: argparse.Namespace) -> int:
     """Check the deck file and report every problem."""
     path = paths.deck_path()
-    raw = store.read_json(path, None)
+    try:
+        raw = store.read_json(path, None)
+    except ValueError as error:
+        print(f"problem: {error}")
+        print(f"{plural(1, 'problem')} found.")
+        return 1
     if raw is None:
         print(f"No deck file at {path}")
         return 1

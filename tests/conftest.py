@@ -28,6 +28,11 @@ def write_deck(cards):
     models.save_deck(paths.deck_path(), {card.id: card for card in cards})
 
 
+def write_broken_deck():
+    """Write a deck file that is not valid JSON."""
+    paths.deck_path().write_text('{"version": 1, "cards": {', encoding="utf-8")
+
+
 def write_states(states):
     """Write card states to the state file."""
     models.save_states(paths.state_path(), states)
