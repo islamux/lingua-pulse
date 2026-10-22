@@ -17,7 +17,7 @@ pipx install .
 Or run it straight from the checkout:
 
 ```bash
-python3 -m linguapulse --version
+PYTHONPATH=src python3 -m linguapulse --version
 ```
 
 ## Quick start
