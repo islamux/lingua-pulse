@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from linguapulse import __version__, cli, config, daemon, diagnostics, notify, paths, store
 
 PAST = "2020-01-01T09:00:00+00:00"
@@ -112,6 +116,19 @@ def test_the_paths_check_reports_an_unwritable_directory(home, monkeypatch):
     check = diagnostics.check_paths()
     assert check.ok is False
     assert "permission denied" in check.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_the_paths_check_reports_a_read_only_directory(home):
+    directory = paths.data_dir()
+    directory.chmod(0o555)
+    try:
+        check = diagnostics.check_paths()
+    finally:
+        directory.chmod(0o755)
+    assert check.ok is False
+    assert str(directory) in check.detail
+    assert "not writable" in check.detail
 
 
 def test_the_deck_check_reports_a_file_that_is_not_json(home):
