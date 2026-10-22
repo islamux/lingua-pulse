@@ -7,10 +7,13 @@ entry to the parser and one entry to the dispatch table.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from datetime import datetime, timezone
+from importlib import resources
 
-from . import __version__, config, models, paths, review, srs, store
+from . import __version__, config, models, paths, review, srs, store, text
 
 
 def format_local(moment: datetime) -> str:
@@ -42,6 +45,46 @@ def plural(count: int, singular: str, plural_form: str | None = None) -> str:
     return f"{count} {plural_form or singular + 's'}"
 
 
+def seed_cards(limit: int | None = None) -> list[models.Card]:
+    """Return the bundled seed cards."""
+    raw = (
+        resources.files("linguapulse")
+        .joinpath("seed_deck.json")
+        .read_text(encoding="utf-8")
+    )
+    document = json.loads(raw)
+    cards = [models.Card.from_dict(entry) for entry in document.get("cards", {}).values()]
+    return cards[:limit] if limit else cards
+
+
+def card_id_for(term: str) -> str:
+    """Return a stable identifier for a term."""
+    normalized = text.normalize(term).strip().lower()
+    plain = all(
+        character.isascii() and (character.isalnum() or character in "-_")
+        for character in normalized
+    )
+    if normalized and plain:
+        return normalized.replace(" ", "-")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:10]
+    return f"card-{digest}"
+
+
+def load_deck_and_states() -> tuple[dict[str, models.Card], dict[str, models.CardState]] | None:
+    """Load the deck and the states.
+
+    None is returned and the problem is reported on stderr when the deck file
+    or the state file cannot be read or holds a malformed value.
+    """
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except (ValueError, TypeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
+    return cards, states
+
+
 def load_session() -> tuple[
     config.Config,
     dict[str, models.Card],
@@ -55,12 +98,10 @@ def load_session() -> tuple[
     """
     paths.ensure_dirs()
     settings = config.load_config()
-    try:
-        cards = models.load_deck(paths.deck_path())
-        states = models.load_states(paths.state_path())
-    except (ValueError, TypeError) as error:
-        print(f"error: {error}", file=sys.stderr)
+    loaded = load_deck_and_states()
+    if loaded is None:
         return None
+    cards, states = loaded
     return settings, cards, states, models.now_utc()
 
 
@@ -120,6 +161,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("status", help="show the deck and the schedule")
     commands.add_parser("validate", help="check the deck file for problems")
+
+    add = commands.add_parser("add", help="add a card to the deck")
+    add.add_argument("--id", help="identifier of the card")
+    add.add_argument("--term", required=True, help="the word to learn")
+    add.add_argument("--source-lang", help="language of the term")
+    add.add_argument(
+        "--lang", action="append", required=True, metavar="LANG", help="language of a translation"
+    )
+    add.add_argument(
+        "--text", action="append", required=True, metavar="TEXT", help="a translation"
+    )
+    add.add_argument("--pinyin", help="pinyin of the chinese translation")
+    add.add_argument("--note", help="a note that is shown with the answer")
+    add.add_argument("--tag", action="append", default=[], help="a tag for the card")
+
+    listing = commands.add_parser("list", help="list the cards of the deck")
+    listing.add_argument("--lang", help="only show the translation of this language")
+    listing.add_argument("--limit", type=int, default=50, help="number of cards to show")
+
+    seed = commands.add_parser("seed", help="add the bundled example cards")
+    seed.add_argument("--limit", type=int, help="number of seed cards to add")
+
+    config_parser = commands.add_parser("config", help="show or change the preferences")
+    config_parser.add_argument("--source-lang", help="language of the term")
+    config_parser.add_argument("--target-lang", help="language that is shown first")
+    config_parser.add_argument(
+        "--notify", dest="notify", action="store_true", default=None, help="enable notifications"
+    )
+    config_parser.add_argument(
+        "--no-notify", dest="notify", action="store_false", help="disable notifications"
+    )
 
     return parser
 
@@ -254,6 +326,114 @@ def command_validate(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_add(args: argparse.Namespace) -> int:
+    """Add one card to the deck."""
+    paths.ensure_dirs()
+    if len(args.lang) != len(args.text):
+        print("error: every --lang needs exactly one --text", file=sys.stderr)
+        return 2
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, states = loaded
+    settings = config.load_config()
+    source_lang = args.source_lang or settings.source_lang
+    card_id = args.id or card_id_for(args.term)
+    if card_id in deck:
+        print(f"error: a card with the id '{card_id}' already exists", file=sys.stderr)
+        return 1
+    translations = {
+        language: text.normalize(value) for language, value in zip(args.lang, args.text)
+    }
+    card = models.Card(
+        id=card_id,
+        term=text.normalize(args.term),
+        source_lang=source_lang,
+        translations=translations,
+        pinyin=text.normalize(args.pinyin) if args.pinyin else "",
+        notes=text.normalize(args.note) if args.note else "",
+        tags=list(args.tag),
+        created_at=models.iso(models.now_utc()),
+    )
+    deck[card.id] = card
+    models.save_deck(paths.deck_path(), deck)
+    if card.id not in states:
+        states[card.id] = srs.new_state(card.id, models.now_utc())
+        models.save_states(paths.state_path(), states)
+    print(f"Added '{card.id}' ({card.source_lang} -> {', '.join(sorted(card.translations))}).")
+    return 0
+
+
+def command_list(args: argparse.Namespace) -> int:
+    """List the cards of the deck."""
+    paths.ensure_dirs()
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, _ = loaded
+    if not deck:
+        print("The deck is empty. Add a card with 'linguapulse add'.")
+        return 0
+    for card in sorted(deck.values(), key=lambda item: item.id)[: max(1, args.limit)]:
+        translations = card.translations
+        if args.lang:
+            translations = {args.lang: translations[args.lang]} if args.lang in translations else {}
+        rendered = ", ".join(
+            f"{language}: {text.isolate(value)}" for language, value in sorted(translations.items())
+        )
+        print(f"{card.id}: {text.isolate(card.term)}  ->  {rendered}")
+    return 0
+
+
+def command_seed(args: argparse.Namespace) -> int:
+    """Add the bundled example cards to the deck."""
+    paths.ensure_dirs()
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, states = loaded
+    added = 0
+    for card in seed_cards(args.limit):
+        if card.id in deck:
+            continue
+        deck[card.id] = card
+        states.setdefault(card.id, srs.new_state(card.id, models.now_utc()))
+        added += 1
+    if added:
+        models.save_deck(paths.deck_path(), deck)
+        models.save_states(paths.state_path(), states)
+    print(f"Added {added} seed card(s), the deck holds {len(deck)} card(s).")
+    return 0
+
+
+def command_config(args: argparse.Namespace) -> int:
+    """Show or change the preferences."""
+    paths.ensure_dirs()
+    settings = config.load_config()
+    source = resolve_language(args.source_lang, settings.source_lang)
+    if source is None:
+        return 2
+    target = resolve_language(args.target_lang, settings.target_lang)
+    if target is None:
+        return 2
+    changed = False
+    if args.source_lang:
+        settings.source_lang = source
+        changed = True
+    if args.target_lang:
+        settings.target_lang = target
+        changed = True
+    if args.notify is not None:
+        settings.notify_enabled = args.notify
+        changed = True
+    if changed:
+        config.save_config(settings)
+    print(f"source_lang = {settings.source_lang}")
+    print(f"target_lang = {settings.target_lang}")
+    print(f"notify_enabled = {str(settings.notify_enabled).lower()}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the command line interface and return the process exit code."""
     parser = build_parser()
@@ -267,5 +447,9 @@ def main(argv: list[str] | None = None) -> int:
         "history": command_history,
         "status": command_status,
         "validate": command_validate,
+        "add": command_add,
+        "list": command_list,
+        "seed": command_seed,
+        "config": command_config,
     }
     return handlers[args.command](args)
