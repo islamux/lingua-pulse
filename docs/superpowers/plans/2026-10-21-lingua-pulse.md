@@ -3832,7 +3832,7 @@ git commit -m "feat: add the deck commands to the cli"
 
 **Interfaces:**
 - Consumes: `models` from Task 4, `notify` from Task 7, `paths` from Task 3, `scheduler` from Task 8.
-- Produces: `daemon.DeliveryReport(delivered, skipped, notified, message)`, `daemon.FailureLog(every=10)` with `should_log(key) -> bool` and `recovered() -> bool`, `daemon.acquire_lock(path=None)`, `daemon.write_pid(path=None)`, `daemon.read_pid(path=None) -> int | None`, `daemon.remove_pid(path=None)`, `daemon.scheduler_is_running(path=None) -> bool`, `daemon.signal_scheduler(path=None) -> bool`, `daemon.deliver_due(cards, states, moment, notifier=None) -> DeliveryReport`, `daemon.run(max_iterations=None, idle_timeout=None) -> int`.
+- Produces: `daemon.DeliveryReport(delivered, skipped, notified, message, handled)`, `daemon.FailureLog(every=10)` with `should_log(key) -> bool` and `recovered() -> bool`, `daemon.acquire_lock(path=None)`, `daemon.write_pid(path=None)`, `daemon.read_pid(path=None) -> int | None`, `daemon.remove_pid(path=None)`, `daemon.scheduler_is_running(path=None) -> bool`, `daemon.signal_scheduler(path=None) -> bool`, `daemon.deliver_due(cards, states, moment, notifier=None) -> DeliveryReport`, `daemon.run(max_iterations=None, idle_timeout=None) -> int`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3844,10 +3844,11 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import linguapulse
-from linguapulse import daemon, models, notify
+from linguapulse import daemon, models, notify, paths, srs
 
 PAST = "2020-01-01T09:00:00+00:00"
 DUE = "2026-10-21T08:55:00+00:00"
@@ -3987,6 +3988,27 @@ def test_the_loop_stops_after_the_configured_number_of_iterations(home):
     assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
 
 
+def test_a_grade_saved_while_sending_survives_the_marks(home, moment, monkeypatch):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    graded = {}
+
+    def grade_while_sending(title, body):
+        states = models.load_states(paths.state_path())
+        graded["state"] = srs.apply_grade(states["hello"], "easy", moment)
+        models.save_states(paths.state_path(), {"hello": graded["state"]})
+        return notify.NotifyResult(True, 0, "")
+
+    monkeypatch.setattr(daemon.notify, "send", grade_while_sending)
+    assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
+    saved = models.load_states(paths.state_path())["hello"]
+    assert saved.reps == graded["state"].reps
+    assert saved.interval_days == graded["state"].interval_days
+    assert saved.ease == graded["state"].ease
+    assert saved.handled_due == due
+
+
 def test_the_scheduler_stops_on_a_terminate_signal(home):
     source_root = str(Path(linguapulse.__file__).resolve().parents[1])
     environment = {**os.environ, "PYTHONPATH": source_root}
@@ -4065,6 +4087,7 @@ class DeliveryReport:
     skipped: tuple[scheduler.Occurrence, ...]
     notified: bool
     message: str
+    handled: tuple[tuple[str, str], ...] = ()
 
 
 class FailureLog:
@@ -4182,13 +4205,32 @@ def _notification_for(group: Sequence[scheduler.Occurrence]) -> tuple[str, str]:
 def _mark_handled(
     states: Mapping[str, models.CardState],
     occurrences: Sequence[scheduler.Occurrence],
-) -> None:
-    """Remember that these occurrences were acted on."""
+) -> tuple[tuple[str, str], ...]:
+    """Remember that these occurrences were acted on and return their marks."""
+    marks: list[tuple[str, str]] = []
     for occurrence in occurrences:
         state = occurrence.state
         if state is None:
             continue
-        state.handled_due = occurrence.due.isoformat()
+        mark = (occurrence.card.id, occurrence.due.isoformat())
+        marks.append(mark)
+        state.handled_due = mark[1]
+    return tuple(marks)
+
+
+def _save_marks(marks: Sequence[tuple[str, str]]) -> dict[str, models.CardState]:
+    """Apply the handled marks to the current state file and save it.
+
+    The states are read again right before the write, because a grade may
+    have been recorded while the notification was being sent. Only the marks
+    are applied, so the grade keeps its own due, interval and ease.
+    """
+    states = models.load_states(paths.state_path())
+    for card_id, due_iso in marks:
+        state = states.setdefault(card_id, models.CardState(card_id=card_id, due=due_iso))
+        state.handled_due = due_iso
+    models.save_states(paths.state_path(), states)
+    return states
 
 
 def deliver_due(
@@ -4200,7 +4242,9 @@ def deliver_due(
     """Deliver the reminder that is due and remember that it was handled.
 
     The message of the report is only set when something went wrong, so that
-    the caller can log it without writing a line for every empty round.
+    the caller can log it without writing a line for every empty round. The
+    handled marks are returned for the caller to persist, because the states
+    it read may be out of date by the time the notification was sent.
     """
     send = notifier or notify.send
     pending = scheduler.pending_occurrences(cards, states, moment)
@@ -4210,18 +4254,19 @@ def deliver_due(
     if reminder is None:
         return DeliveryReport((), (), False, "")
     if not reminder.group:
-        _mark_handled(states, reminder.skipped)
-        return DeliveryReport((), reminder.skipped, False, "")
+        marks = _mark_handled(states, reminder.skipped)
+        return DeliveryReport((), reminder.skipped, False, "", marks)
     title, body = _notification_for(reminder.group)
     result = send(title, body)
-    _mark_handled(states, reminder.handled)
+    marks = _mark_handled(states, reminder.handled)
     if result.ok:
-        return DeliveryReport(reminder.group, reminder.skipped, True, "")
+        return DeliveryReport(reminder.group, reminder.skipped, True, "", marks)
     return DeliveryReport(
         reminder.group,
         reminder.skipped,
         False,
         result.message or "the notification failed",
+        marks,
     )
 
 
@@ -4271,8 +4316,8 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
             states = models.load_states(paths.state_path())
             moment = models.now_utc()
             report = deliver_due(cards, states, moment)
-            if report.delivered or report.skipped:
-                models.save_states(paths.state_path(), states)
+            if report.handled:
+                states = _save_marks(report.handled)
             if report.delivered:
                 print(f"delivered {len(report.delivered)} reminder(s)", flush=True)
             elif report.skipped:
@@ -4310,7 +4355,7 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
 
 Run: `python3 -m pytest tests/test_daemon.py -v`
 
-Expected: PASS, 15 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: Wire the CLI to the scheduler**
 
@@ -4358,7 +4403,7 @@ def command_daemon(args: argparse.Namespace) -> int:
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, 182 tests, every test of every task.
+Expected: PASS, 183 tests, every test of every task.
 
 - [ ] **Step 8: Commit (only when the user explicitly requested commits)**
 
