@@ -285,7 +285,7 @@ def test_display_width_counts_chinese_as_two_columns():
 
 def test_display_width_ignores_combining_marks():
     assert text.display_width("é") == 1
-    assert text.display_width("é") == 1
+    assert text.display_width("e\u0301") == 1
 
 
 def test_display_width_ignores_directional_isolates():
