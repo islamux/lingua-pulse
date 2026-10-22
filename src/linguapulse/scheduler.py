@@ -59,6 +59,28 @@ def occurrence_due(
     return moment
 
 
+def _scheduled_review(
+    card: models.Card,
+    state: models.CardState | None,
+    moment: datetime,
+) -> Occurrence | None:
+    """Return the scheduled review of a card, or None when it has none.
+
+    A card without a state has no scheduled review: it is never due, it never
+    wakes the scheduler up and it is never reminded. The relearn step of an
+    "again" grade is not notifiable, so it is not reminded either. An
+    occurrence that was already acted on is not a review any more.
+    """
+    if state is None or not state.notifiable:
+        return None
+    due = occurrence_due(card, state, moment)
+    if state.handled_due:
+        handled = models.safe_parse_iso(state.handled_due)
+        if handled is not None and handled == due:
+            return None
+    return Occurrence(card=card, due=due, state=state)
+
+
 def pending_occurrences(
     cards: Mapping[str, models.Card],
     states: Mapping[str, models.CardState],
@@ -67,18 +89,10 @@ def pending_occurrences(
     """Return the occurrences that are due and that were not acted on yet."""
     pending: list[Occurrence] = []
     for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        if state is not None and not state.notifiable:
+        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
+        if occurrence is None or occurrence.due > moment:
             continue
-        due = occurrence_due(card, state, moment)
-        if due > moment:
-            continue
-        if state is not None and state.handled_due:
-            handled = models.safe_parse_iso(state.handled_due)
-            if handled is not None and handled == due:
-                continue
-        pending.append(Occurrence(card=card, due=due, state=state))
+        pending.append(occurrence)
     return pending
 
 
@@ -90,18 +104,10 @@ def next_wakeup(
     """Return the exact time of the next occurrence worth waking up for."""
     candidates: list[datetime] = []
     for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        if state is None or not state.notifiable:
+        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
+        if occurrence is None or occurrence.due <= moment:
             continue
-        due = occurrence_due(card, state, moment)
-        if due <= moment:
-            continue
-        if state.handled_due:
-            handled = models.safe_parse_iso(state.handled_due)
-            if handled is not None and handled == due:
-                continue
-        candidates.append(due)
+        candidates.append(occurrence.due)
     return min(candidates) if candidates else None
 
 
