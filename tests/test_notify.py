@@ -33,6 +33,22 @@ def test_notify_send_path_is_none_when_it_is_not_installed():
     assert notify.notify_send_path({"PATH": "/nonexistent"}) is None
 
 
+def test_notify_send_path_is_none_without_a_path_in_the_environment():
+    assert notify.notify_send_path({"XDG_RUNTIME_DIR": "/run/user/1000"}) is None
+
+
+def test_the_notification_daemon_is_not_looked_up_without_a_path(monkeypatch):
+    listing = (
+        "NAME                           PID PROCESS  USER  CONNECTION  UNIT\n"
+        "org.freedesktop.Notifications  3576 dunst    user  :1.20       app-org.freedesktop.Notifications.service\n"
+    )
+    monkeypatch.setattr(
+        notify.subprocess, "run", lambda *args, **kwargs: FakeCompleted(0, listing)
+    )
+    env = {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+    assert notify.notification_daemon(env) is None
+
+
 def test_send_without_notify_send_reports_an_actionable_error():
     result = notify.send("title", "body", env={"PATH": "/nonexistent", "XDG_RUNTIME_DIR": "/run/user/1000"})
     assert result.ok is False
@@ -92,6 +108,27 @@ def test_the_bus_address_is_passed_to_the_child_process(monkeypatch):
     monkeypatch.setattr(notify.subprocess, "run", fake_run)
     notify.send("title", "body", env={"XDG_RUNTIME_DIR": "/run/user/1000", "PATH": "/usr/bin:/bin"})
     assert captured["env"]["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+
+
+def test_the_arguments_carry_the_title_and_the_body(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return FakeCompleted(0)
+
+    monkeypatch.setattr(notify.shutil, "which", lambda name, path=None: "/usr/bin/notify-send")
+    monkeypatch.setattr(notify.subprocess, "run", fake_run)
+    notify.send("learned word", "the body of the notification", env=BUS_ENV, urgency="critical")
+    args = captured["args"]
+    assert args[0] == "/usr/bin/notify-send"
+    assert "--urgency=critical" in args
+    separator = args.index("--")
+    assert args[separator + 1] == "learned word"
+    assert args[separator + 2] == "the body of the notification"
+    assert args[separator + 3 :] == []
+    notify.send("title", "body", env=BUS_ENV)
+    assert "--urgency=normal" in captured["args"]
 
 
 def test_the_notification_daemon_is_read_from_the_bus(monkeypatch):

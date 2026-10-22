@@ -30,7 +30,7 @@ def _environment(env: Mapping[str, str] | None) -> dict[str, str]:
 def notify_send_path(env: Mapping[str, str] | None = None) -> str | None:
     """Return the absolute path of notify-send, or None when it is missing."""
     environment = _environment(env)
-    return shutil.which(NOTIFY_SEND, path=environment.get("PATH"))
+    return shutil.which(NOTIFY_SEND, path=environment.get("PATH") or "")
 
 
 def session_bus_address(env: Mapping[str, str] | None = None) -> str | None:
@@ -59,7 +59,7 @@ def notification_daemon(env: Mapping[str, str] | None = None) -> str | None:
     environment = _environment(env)
     if session_bus_address(environment) is None:
         return None
-    busctl = shutil.which(BUSCTL, path=environment.get("PATH"))
+    busctl = shutil.which(BUSCTL, path=environment.get("PATH") or "")
     if not busctl:
         return None
     try:
