@@ -2644,7 +2644,14 @@ Create `tests/test_cli.py`:
 ```python
 from datetime import datetime
 
-from conftest import make_card, write_broken_deck, write_deck, write_states
+from conftest import (
+    make_card,
+    write_broken_deck,
+    write_deck,
+    write_malformed_deck,
+    write_malformed_states,
+    write_states,
+)
 from linguapulse import cli, config, models, paths, store
 
 PAST = "2020-01-01T09:00:00+00:00"
@@ -2721,6 +2728,16 @@ def test_show_reports_a_broken_state_file(home, capsys):
     assert "is not valid JSON" in captured.err
 
 
+def test_show_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
+
+
 def test_show_rejects_an_unknown_language(home, capsys):
     write_deck([make_card()])
     write_states({"hello": models.CardState(card_id="hello", due=PAST)})
@@ -2768,6 +2785,16 @@ def test_next_reports_a_broken_deck_file(home, capsys):
     assert captured.out == ""
     assert "error:" in captured.err
     assert "is not valid JSON" in captured.err
+
+
+def test_next_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["next", "good"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
 
 
 def test_next_rejects_an_unknown_language(home, capsys):
@@ -2874,6 +2901,16 @@ def test_status_reports_a_broken_deck_file(home, capsys):
     assert "is not valid JSON" in captured.err
 
 
+def test_status_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["status"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
+
+
 def test_validate_accepts_a_clean_deck(home, capsys):
     write_deck([make_card()])
     assert cli.main(["validate"]) == 0
@@ -2902,6 +2939,15 @@ def test_validate_reports_a_broken_deck_file(home, capsys):
     assert captured.err == ""
     assert "problem:" in captured.out
     assert "is not valid JSON" in captured.out
+
+
+def test_validate_reports_a_malformed_deck_file(home, capsys):
+    write_malformed_deck()
+    assert cli.main(["validate"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "problem: 'int' object is not iterable" in captured.out
+    assert "1 problem found." in captured.out
 ```
 
 Add the shared fixtures and helpers to `tests/conftest.py`:
@@ -2942,6 +2988,24 @@ def write_broken_deck():
     paths.deck_path().write_text('{"version": 1, "cards": {', encoding="utf-8")
 
 
+def write_malformed_deck():
+    """Write a deck file that is valid JSON but holds a wrongly typed field."""
+    paths.deck_path().write_text(
+        '{"version": 1, "cards": {"hello": {"id": "hello", "term": "hello", '
+        '"source_lang": "en", "translations": {"ar": "مرحبا"}, "tags": 5}}}\n',
+        encoding="utf-8",
+    )
+
+
+def write_malformed_states():
+    """Write a state file that is valid JSON but holds a wrongly typed field."""
+    paths.state_path().write_text(
+        '{"version": 1, "cards": {"hello": {"card_id": "hello", '
+        '"due": "2020-01-01T09:00:00+00:00", "reps": null}}}\n',
+        encoding="utf-8",
+    )
+
+
 def write_states(states):
     """Write card states to the state file."""
     models.save_states(paths.state_path(), states)
@@ -2950,7 +3014,14 @@ def write_states(states):
 Add this import at the top of `tests/test_cli.py`, so that the file uses the shared helpers:
 
 ```python
-from conftest import make_card, write_broken_deck, write_deck, write_states
+from conftest import (
+    make_card,
+    write_broken_deck,
+    write_deck,
+    write_malformed_deck,
+    write_malformed_states,
+    write_states,
+)
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -3017,14 +3088,14 @@ def load_session() -> tuple[
     """Load the configuration, the deck, the states and the current moment.
 
     None is returned and the problem is reported on stderr when the deck file
-    or the state file cannot be read.
+    or the state file cannot be read or holds a malformed value.
     """
     paths.ensure_dirs()
     settings = config.load_config()
     try:
         cards = models.load_deck(paths.deck_path())
         states = models.load_states(paths.state_path())
-    except ValueError as error:
+    except (ValueError, TypeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return None
     return settings, cards, states, models.now_utc()
@@ -3210,7 +3281,13 @@ def command_validate(args: argparse.Namespace) -> int:
     if problems:
         print(f"{plural(len(problems), 'problem')} found.")
         return 1
-    print(f"{plural(len(models.load_deck(path)), 'card')}, no problems found.")
+    try:
+        cards = models.load_deck(path)
+    except (ValueError, TypeError) as error:
+        print(f"problem: {error}")
+        print(f"{plural(1, 'problem')} found.")
+        return 1
+    print(f"{plural(len(cards), 'card')}, no problems found.")
     return 0
 
 
@@ -3235,7 +3312,7 @@ def main(argv: list[str] | None = None) -> int:
 
 Run: `python3 -m pytest tests/test_cli.py -v`
 
-Expected: PASS, 26 tests.
+Expected: PASS, 30 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
