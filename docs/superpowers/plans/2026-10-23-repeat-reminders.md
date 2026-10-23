@@ -595,7 +595,7 @@ In `src/linguapulse/diagnostics.py`, load the settings inside the existing `try`
 
 - [ ] **Step 12: Run the full suite**
 
-Run: `python3 -m pytest -q`
+Run: `python3 -m pytest`
 Expected: PASS, with the previous count plus the new tests.
 
 - [ ] **Step 13: Commit**
@@ -698,7 +698,7 @@ Expected: no output.
 
 - [ ] **Step 7: Run the full suite and commit**
 
-Run: `python3 -m pytest -q`
+Run: `python3 -m pytest`
 Expected: PASS.
 
 ```bash
@@ -719,7 +719,7 @@ git commit -m "docs: describe the repeated 10-minute reminders"
 
 - [ ] **Step 1: Run the whole suite**
 
-Run: `python3 -m pytest -q`
+Run: `python3 -m pytest`
 Expected: PASS.
 
 - [ ] **Step 2: Exercise one overdue card in a scratch home**
@@ -727,7 +727,7 @@ Expected: PASS.
 ```bash
 export LINGUAPULSE_HOME=/tmp/opencode/lp-repeat
 rm -rf "$LINGUAPULSE_HOME"
-env PYTHONPATH=src python3 -m linguapulse add --term hello --lang zh --text 你好 --pinyin nǐ hǎo
+env PYTHONPATH=src python3 -m linguapulse add --term hello --lang zh --text 你好 --pinyin 'nǐ hǎo'
 env PYTHONPATH=src python3 -m linguapulse config --target-lang zh
 timeout 4 env PYTHONPATH=src python3 -m linguapulse daemon
 env PYTHONPATH=src python3 -m linguapulse status
