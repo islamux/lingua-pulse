@@ -153,6 +153,11 @@ def test_the_bundled_seed_cards_are_valid(home):
         assert models.validate_deck_raw({"cards": {card.id: raw}}) == []
 
 
+def test_the_bundled_seed_cards_do_not_use_arabic(home):
+    for card in cli.seed_cards():
+        assert "ar" not in card.translations
+
+
 def test_config_shows_the_current_settings(home, capsys):
     assert cli.main(["config"]) == 0
     out = capsys.readouterr().out

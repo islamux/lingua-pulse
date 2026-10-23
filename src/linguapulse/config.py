@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from . import models, paths, store
 
 DEFAULT_SOURCE_LANG = "en"
-DEFAULT_TARGET_LANG = "ar"
+DEFAULT_TARGET_LANG = "zh"
 
 
 @dataclass
