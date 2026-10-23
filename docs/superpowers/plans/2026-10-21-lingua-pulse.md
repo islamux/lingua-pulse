@@ -10,7 +10,7 @@
 
 **Spec:** `plan.md` (repository root) — the plan argues from that spec, so the spec travels with it; executors read both.
 
-**Status:** The code of every task was extracted from this document, assembled in a scratch directory and executed: 143 tests pass, the command line interface was exercised end to end, the generated unit file passes `systemd-analyze --user verify`, and the scheduler starts, refuses a second instance and stops on `SIGTERM`.
+**Status:** The code of every task was extracted from this document, assembled in a scratch directory and executed: 247 tests pass, the command line interface was exercised end to end, the generated unit file passes `systemd-analyze --user verify`, and the scheduler starts, refuses a second instance and stops on `SIGTERM`.
 
 ## Global Constraints
 
@@ -129,6 +129,20 @@ def test_cli_version_flag(capsys):
 
     assert main(["--version"]) == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_cli_help_returns_zero(capsys):
+    from linguapulse.cli import main
+
+    assert main(["--help"]) == 0
+    capsys.readouterr()
+
+
+def test_cli_unknown_flag_returns_two(capsys):
+    from linguapulse.cli import main
+
+    assert main(["--not-a-real-flag"]) == 2
+    capsys.readouterr()
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -238,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
 
 Run: `python3 -m pytest tests/test_package.py -v`
 
-Expected: PASS, 3 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -273,6 +287,13 @@ def test_normalize_returns_nfc_form():
     assert text.normalize(decomposed) != decomposed
 
 
+def test_char_width_reports_the_columns_of_one_character():
+    assert text.char_width("a") == 1
+    assert text.char_width("你") == 2
+    assert text.char_width("\u0301") == 0
+    assert text.char_width(text.PDI) == 0
+
+
 def test_display_width_counts_latin_and_arabic_as_one_column():
     assert text.display_width("hello") == 5
     assert text.display_width("مرحبا") == 5
@@ -285,7 +306,7 @@ def test_display_width_counts_chinese_as_two_columns():
 
 def test_display_width_ignores_combining_marks():
     assert text.display_width("é") == 1
-    assert text.display_width("é") == 1
+    assert text.display_width("e\u0301") == 1
 
 
 def test_display_width_ignores_directional_isolates():
@@ -296,6 +317,14 @@ def test_pad_uses_display_width_not_character_count():
     assert text.pad("你好", 6) == "你好  "
     assert text.pad("ab", 4) == "ab  "
     assert text.pad("ab", 4, align="right") == "  ab"
+
+
+def test_pad_centers_the_text_in_the_gap():
+    assert text.pad("ab", 6, align="center") == "  ab  "
+
+
+def test_pad_keeps_text_that_is_wider_than_the_width():
+    assert text.pad("你好", 2) == "你好"
 
 
 def test_contains_rtl_detects_right_to_left_scripts():
@@ -397,7 +426,7 @@ def strip_isolates(text: str) -> str:
 
 Run: `python3 -m pytest tests/test_text.py -v`
 
-Expected: PASS, 9 tests.
+Expected: PASS, 12 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -419,7 +448,7 @@ git commit -m "feat: add unicode helpers for mixed direction terminal output"
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `paths.ENV_HOME = "LINGUAPULSE_HOME"`, `paths.data_dir() -> Path`, `paths.config_dir() -> Path`, `paths.state_dir() -> Path`, `paths.deck_path() -> Path`, `paths.state_path() -> Path`, `paths.history_path() -> Path`, `paths.config_path() -> Path`, `paths.lock_path() -> Path`, `paths.pid_path() -> Path`, `paths.ensure_dirs() -> None`, `store.read_json(path: Path, default: Any = None) -> Any`, `store.write_json(path: Path, payload: Any) -> None`, `store.append_jsonl(path: Path, payload: Any) -> None`, `store.read_jsonl(path: Path) -> list[Any]`.
+- Produces: `paths.ENV_HOME = "LINGUAPULSE_HOME"`, `paths.data_dir() -> Path`, `paths.config_dir() -> Path`, `paths.state_dir() -> Path`, `paths.deck_path() -> Path`, `paths.state_path() -> Path`, `paths.history_path() -> Path`, `paths.config_path() -> Path`, `paths.lock_path() -> Path`, `paths.pid_path() -> Path`, `paths.ensure_dirs() -> None`, `store.read_json(path: Path, default: Any = None) -> Any`, `store.write_json(path: Path, payload: Any) -> None`, `store.append_jsonl(path: Path, payload: Any) -> None`, `store.read_jsonl(path: Path) -> list[Any]`, `store.state_lock(path: Path | None = None)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -483,6 +512,15 @@ def test_read_json_raises_on_broken_json(tmp_path):
     broken.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError):
         store.read_json(broken, None)
+
+
+def test_read_json_raises_a_plain_value_error_for_a_broken_document(tmp_path):
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        store.read_json(broken, None)
+    assert not isinstance(excinfo.value, json.JSONDecodeError)
+    assert str(broken) in str(excinfo.value)
 
 
 def test_write_json_keeps_unicode_unescaped(tmp_path):
@@ -612,11 +650,15 @@ Create `src/linguapulse/store.py`:
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from . import paths
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -654,6 +696,26 @@ def write_json(path: Path, payload: Any) -> None:
         raise
 
 
+@contextlib.contextmanager
+def state_lock(path: Path | None = None) -> Iterator[None]:
+    """Serialize the writers of the state file with an exclusive file lock.
+
+    Every writer re-reads the state file under this lock and applies only its
+    own change, so a scheduler mark and a grade recorded at the same moment
+    never overwrite each other. The lock is never held while a notification
+    is sent.
+    """
+    target = path or paths.state_dir() / "state.lock"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(target, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
 def append_jsonl(path: Path, payload: Any) -> None:
     """Append one JSON object as a line to a JSON Lines file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -682,7 +744,7 @@ def read_jsonl(path: Path) -> list[Any]:
 
 Run: `python3 -m pytest tests/test_paths.py tests/test_store.py -v`
 
-Expected: PASS, 10 tests.
+Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -753,6 +815,28 @@ def test_load_deck_rejects_a_file_without_cards(tmp_path):
         raise AssertionError("expected a ValueError")
 
 
+def test_load_deck_rejects_a_null_card(tmp_path):
+    target = tmp_path / "deck.json"
+    target.write_text('{"cards": {"hello": null}}', encoding="utf-8")
+    try:
+        models.load_deck(target)
+    except ValueError as exc:
+        assert "not a valid deck file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
+def test_load_deck_rejects_a_card_that_is_not_an_object(tmp_path):
+    target = tmp_path / "deck.json"
+    target.write_text('{"cards": {"hello": "a card"}}', encoding="utf-8")
+    try:
+        models.load_deck(target)
+    except ValueError as exc:
+        assert "not a valid deck file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
 def test_card_state_round_trip():
     state = models.CardState(
         card_id="hello",
@@ -765,6 +849,56 @@ def test_card_state_round_trip():
 def test_card_state_due_dt_parses_the_timestamp():
     state = models.CardState(card_id="hello", due="2026-10-22T09:00:00+00:00")
     assert state.due_dt() == datetime(2026, 10, 22, 9, 0, tzinfo=timezone.utc)
+
+
+def test_load_states_returns_an_empty_mapping_when_the_file_is_missing(tmp_path):
+    assert models.load_states(tmp_path / "state.json") == {}
+
+
+def test_save_and_load_states_round_trip(tmp_path):
+    states = {
+        "hello": models.CardState(
+            card_id="hello",
+            due="2026-10-22T09:00:00+00:00",
+            handled_due="2026-10-21T09:00:00+00:00",
+        )
+    }
+    target = tmp_path / "state.json"
+    models.save_states(target, states)
+    assert models.load_states(target) == states
+
+
+def test_load_states_rejects_a_file_without_cards(tmp_path):
+    target = tmp_path / "state.json"
+    target.write_text('{"version": 1}', encoding="utf-8")
+    try:
+        models.load_states(target)
+    except ValueError as exc:
+        assert "is not a valid state file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
+def test_load_states_rejects_a_null_card(tmp_path):
+    target = tmp_path / "state.json"
+    target.write_text('{"cards": {"hello": null}}', encoding="utf-8")
+    try:
+        models.load_states(target)
+    except ValueError as exc:
+        assert "is not a valid state file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
+
+
+def test_load_states_rejects_a_card_that_is_not_an_object(tmp_path):
+    target = tmp_path / "state.json"
+    target.write_text('{"cards": {"hello": "a card"}}', encoding="utf-8")
+    try:
+        models.load_states(target)
+    except ValueError as exc:
+        assert "is not a valid state file" in str(exc)
+    else:
+        raise AssertionError("expected a ValueError")
 
 
 def test_validate_accepts_a_correct_card():
@@ -782,6 +916,13 @@ def test_validate_reports_a_missing_pinyin_for_chinese():
 def test_validate_reports_pinyin_without_tone_marks():
     card = make_card().to_dict()
     card["pinyin"] = "ni hao"
+    problems = models.validate_deck_raw({"cards": {"hello": card}})
+    assert any("no tone marks" in problem for problem in problems)
+
+
+def test_validate_reports_pinyin_with_a_bare_umlaut_as_having_no_tone_marks():
+    card = make_card().to_dict()
+    card["pinyin"] = "lü"
     problems = models.validate_deck_raw({"cards": {"hello": card}})
     assert any("no tone marks" in problem for problem in problems)
 
@@ -853,7 +994,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import store
 
 SUPPORTED_LANGUAGES = ("ar", "en", "es", "fr", "tr", "zh")
-PINYIN_TONE_MARKS = frozenset("āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜüńňǹḿ")
+PINYIN_TONE_MARKS = frozenset("āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ")
 
 
 def now_utc() -> datetime:
@@ -1031,6 +1172,10 @@ def load_deck(path: Path) -> dict[str, Card]:
         raise ValueError(f"{path} is not a valid deck file")
     deck: dict[str, Card] = {}
     for card_id, card_raw in cards.items():
+        if not isinstance(card_raw, Mapping):
+            raise ValueError(
+                f"{path} is not a valid deck file: card {card_id!r} is not an object"
+            )
         data = dict(card_raw)
         data.setdefault("id", card_id)
         card = Card.from_dict(data)
@@ -1056,6 +1201,10 @@ def load_states(path: Path) -> dict[str, CardState]:
         raise ValueError(f"{path} is not a valid state file")
     states: dict[str, CardState] = {}
     for card_id, state_raw in cards.items():
+        if not isinstance(state_raw, Mapping):
+            raise ValueError(
+                f"{path} is not a valid state file: card {card_id!r} is not an object"
+            )
         data = dict(state_raw)
         data.setdefault("card_id", card_id)
         states[str(card_id)] = CardState.from_dict(data)
@@ -1131,7 +1280,7 @@ def validate_deck_raw(raw: Mapping[str, Any]) -> list[str]:
 
 Run: `python3 -m pytest tests/test_models.py -v`
 
-Expected: PASS, 17 tests.
+Expected: PASS, 23 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -1230,7 +1379,7 @@ def test_the_interval_is_capped():
     state = srs.new_state("hello", NOW)
     for _ in range(30):
         state = srs.apply_grade(state, "easy", NOW, ZONE)
-    assert state.interval_days <= srs.MAX_INTERVAL_DAYS
+    assert state.interval_days == srs.MAX_INTERVAL_DAYS
 
 
 def test_grading_clears_the_handled_occurrence():
@@ -1250,6 +1399,30 @@ def test_a_day_interval_keeps_the_local_time_of_day_across_a_dst_change():
     before = datetime(2026, 3, 28, 9, 0, tzinfo=timezone.utc)
     state = srs.apply_grade(srs.new_state("hello", before), "good", before, zone)
     assert state.due_dt().astimezone(zone).strftime("%Y-%m-%d %H:%M") == "2026-03-29 10:00"
+
+
+def test_apply_grade_does_not_mutate_the_input_state():
+    state = srs.new_state("hello", NOW)
+    before = (
+        state.due,
+        state.interval_days,
+        state.ease,
+        state.reps,
+        state.lapses,
+        state.handled_due,
+        state.notifiable,
+    )
+    _ = srs.apply_grade(state, "good", NOW, ZONE)
+    after = (
+        state.due,
+        state.interval_days,
+        state.ease,
+        state.reps,
+        state.lapses,
+        state.handled_due,
+        state.notifiable,
+    )
+    assert after == before
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1330,7 +1503,7 @@ def apply_grade(
         else:
             interval = interval * ease
         reps += 1
-    else:
+    else:  # easy
         if reps == 0:
             interval = 3.0
         elif reps == 1:
@@ -1363,7 +1536,7 @@ def apply_grade(
 
 Run: `python3 -m pytest tests/test_srs.py -v`
 
-Expected: PASS, 12 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -1381,7 +1554,7 @@ git commit -m "feat: add spaced repetition grading"
 - Create: `tests/test_config.py`
 
 **Interfaces:**
-- Consumes: `paths.config_path()`, `store.read_json`, `store.write_json` from Task 3.
+- Consumes: `paths.config_path()`, `store.read_json`, `store.write_json` from Task 3, `models.SUPPORTED_LANGUAGES` from Task 4.
 - Produces: `config.Config` (fields `source_lang: str`, `target_lang: str`, `notify_enabled: bool`) with `to_dict()` and `from_dict(raw)`, `config.load_config() -> Config`, `config.save_config(settings: Config) -> None`, `config.DEFAULT_SOURCE_LANG = "en"`, `config.DEFAULT_TARGET_LANG = "ar"`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1389,7 +1562,7 @@ git commit -m "feat: add spaced repetition grading"
 Create `tests/test_config.py`:
 
 ```python
-from linguapulse import config, paths
+from linguapulse import config, models, paths
 
 
 def test_defaults_are_used_when_no_file_exists(tmp_path, monkeypatch):
@@ -1416,6 +1589,28 @@ def test_a_broken_file_falls_back_to_the_defaults(tmp_path, monkeypatch):
     paths.config_path().write_text('{"source_lang": 5}', encoding="utf-8")
     settings = config.load_config()
     assert settings.source_lang == config.DEFAULT_SOURCE_LANG
+
+
+def test_a_file_that_is_not_valid_json_falls_back_to_the_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_HOME, str(tmp_path))
+    paths.ensure_dirs()
+    paths.config_path().write_text("{not json", encoding="utf-8")
+    settings = config.load_config()
+    assert settings.source_lang == config.DEFAULT_SOURCE_LANG
+    assert settings.target_lang == config.DEFAULT_TARGET_LANG
+    assert settings.notify_enabled is True
+
+
+def test_an_unsupported_language_falls_back_to_the_default(tmp_path, monkeypatch):
+    monkeypatch.setenv(paths.ENV_HOME, str(tmp_path))
+    paths.ensure_dirs()
+    paths.config_path().write_text(
+        '{"source_lang": "de", "target_lang": "fr"}', encoding="utf-8"
+    )
+    assert "de" not in models.SUPPORTED_LANGUAGES
+    settings = config.load_config()
+    assert settings.source_lang == config.DEFAULT_SOURCE_LANG
+    assert settings.target_lang == "fr"
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1436,7 +1631,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from . import paths, store
+from . import models, paths, store
 
 DEFAULT_SOURCE_LANG = "en"
 DEFAULT_TARGET_LANG = "ar"
@@ -1465,9 +1660,9 @@ class Config:
             return settings
         source = raw.get("source_lang")
         target = raw.get("target_lang")
-        if isinstance(source, str) and source.strip():
+        if isinstance(source, str) and source.strip() in models.SUPPORTED_LANGUAGES:
             settings.source_lang = source.strip()
-        if isinstance(target, str) and target.strip():
+        if isinstance(target, str) and target.strip() in models.SUPPORTED_LANGUAGES:
             settings.target_lang = target.strip()
         if "notify_enabled" in raw:
             settings.notify_enabled = bool(raw["notify_enabled"])
@@ -1476,7 +1671,11 @@ class Config:
 
 def load_config() -> Config:
     """Load the configuration, falling back to the defaults."""
-    return Config.from_dict(store.read_json(paths.config_path(), {}))
+    try:
+        raw = store.read_json(paths.config_path(), {})
+    except ValueError:
+        return Config()
+    return Config.from_dict(raw)
 
 
 def save_config(settings: Config) -> None:
@@ -1488,7 +1687,7 @@ def save_config(settings: Config) -> None:
 
 Run: `python3 -m pytest tests/test_config.py -v`
 
-Expected: PASS, 3 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -1549,6 +1748,22 @@ def test_notify_send_path_is_none_when_it_is_not_installed():
     assert notify.notify_send_path({"PATH": "/nonexistent"}) is None
 
 
+def test_notify_send_path_is_none_without_a_path_in_the_environment():
+    assert notify.notify_send_path({"XDG_RUNTIME_DIR": "/run/user/1000"}) is None
+
+
+def test_the_notification_daemon_is_not_looked_up_without_a_path(monkeypatch):
+    listing = (
+        "NAME                           PID PROCESS  USER  CONNECTION  UNIT\n"
+        "org.freedesktop.Notifications  3576 dunst    user  :1.20       app-org.freedesktop.Notifications.service\n"
+    )
+    monkeypatch.setattr(
+        notify.subprocess, "run", lambda *args, **kwargs: FakeCompleted(0, listing)
+    )
+    env = {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}
+    assert notify.notification_daemon(env) is None
+
+
 def test_send_without_notify_send_reports_an_actionable_error():
     result = notify.send("title", "body", env={"PATH": "/nonexistent", "XDG_RUNTIME_DIR": "/run/user/1000"})
     assert result.ok is False
@@ -1556,7 +1771,8 @@ def test_send_without_notify_send_reports_an_actionable_error():
     assert "notify-send" in result.message
 
 
-def test_send_without_a_session_bus_explains_the_problem():
+def test_send_without_a_session_bus_explains_the_problem(monkeypatch):
+    monkeypatch.setattr(notify.shutil, "which", lambda name, path=None: "/usr/bin/notify-send")
     result = notify.send("title", "body", env={"PATH": "/usr/bin:/bin"})
     assert result.ok is False
     assert "session bus" in result.message
@@ -1583,6 +1799,19 @@ def test_send_reports_success(monkeypatch):
     assert result.code == 0
 
 
+def test_send_reports_a_timeout_as_a_failure(monkeypatch):
+    monkeypatch.setattr(notify.shutil, "which", lambda name, path=None: "/usr/bin/notify-send")
+
+    def fake_run(args, **kwargs):
+        raise notify.subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(notify.subprocess, "run", fake_run)
+    result = notify.send("title", "body", env=BUS_ENV)
+    assert result.ok is False
+    assert result.code == 124
+    assert "timed out" in result.message
+
+
 def test_the_bus_address_is_passed_to_the_child_process(monkeypatch):
     captured = {}
 
@@ -1594,6 +1823,27 @@ def test_the_bus_address_is_passed_to_the_child_process(monkeypatch):
     monkeypatch.setattr(notify.subprocess, "run", fake_run)
     notify.send("title", "body", env={"XDG_RUNTIME_DIR": "/run/user/1000", "PATH": "/usr/bin:/bin"})
     assert captured["env"]["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+
+
+def test_the_arguments_carry_the_title_and_the_body(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return FakeCompleted(0)
+
+    monkeypatch.setattr(notify.shutil, "which", lambda name, path=None: "/usr/bin/notify-send")
+    monkeypatch.setattr(notify.subprocess, "run", fake_run)
+    notify.send("learned word", "the body of the notification", env=BUS_ENV, urgency="critical")
+    args = captured["args"]
+    assert args[0] == "/usr/bin/notify-send"
+    assert "--urgency=critical" in args
+    separator = args.index("--")
+    assert args[separator + 1] == "learned word"
+    assert args[separator + 2] == "the body of the notification"
+    assert args[separator + 3 :] == []
+    notify.send("title", "body", env=BUS_ENV)
+    assert "--urgency=normal" in captured["args"]
 
 
 def test_the_notification_daemon_is_read_from_the_bus(monkeypatch):
@@ -1655,7 +1905,7 @@ def _environment(env: Mapping[str, str] | None) -> dict[str, str]:
 def notify_send_path(env: Mapping[str, str] | None = None) -> str | None:
     """Return the absolute path of notify-send, or None when it is missing."""
     environment = _environment(env)
-    return shutil.which(NOTIFY_SEND, path=environment.get("PATH"))
+    return shutil.which(NOTIFY_SEND, path=environment.get("PATH") or "")
 
 
 def session_bus_address(env: Mapping[str, str] | None = None) -> str | None:
@@ -1684,7 +1934,7 @@ def notification_daemon(env: Mapping[str, str] | None = None) -> str | None:
     environment = _environment(env)
     if session_bus_address(environment) is None:
         return None
-    busctl = shutil.which(BUSCTL, path=environment.get("PATH"))
+    busctl = shutil.which(BUSCTL, path=environment.get("PATH") or "")
     if not busctl:
         return None
     try:
@@ -1755,7 +2005,7 @@ def send(
 
 Run: `python3 -m pytest tests/test_notify.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 16 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -1774,7 +2024,7 @@ git commit -m "feat: add notification delivery with actionable diagnostics"
 - Create: `tests/test_scheduler.py`
 
 **Interfaces:**
-- Consumes: `models.Card`, `models.CardState`, `models.parse_iso` from Task 4, `srs.GRACE_MINUTES` from Task 5.
+- Consumes: `models.Card`, `models.CardState`, `models.safe_parse_iso` from Task 4, `srs.GRACE_MINUTES` from Task 5.
 - Produces: `scheduler.Occurrence(card, due, state)` with the property `due_iso`, `scheduler.Reminder(due, group, skipped)` with the property `handled`, `scheduler.occurrence_due(card, state, moment) -> datetime`, `scheduler.pending_occurrences(cards, states, moment) -> list[Occurrence]`, `scheduler.next_wakeup(cards, states, moment) -> datetime | None`, `scheduler.plan_reminder(pending, moment) -> Reminder | None`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1830,10 +2080,41 @@ def test_pending_occurrences_skips_an_occurrence_that_was_already_handled():
     assert scheduler.pending_occurrences(cards, states, NOW) == []
 
 
+def test_pending_occurrences_reminds_a_card_that_got_a_new_due_time():
+    cards = {"hello": make_card()}
+    states = {
+        "hello": state_for(
+            "hello",
+            "2026-10-21T08:00:00+00:00",
+            handled_due="2026-10-20T08:00:00+00:00",
+        )
+    }
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    assert [occurrence.card.id for occurrence in pending] == ["hello"]
+
+
 def test_pending_occurrences_skips_relearn_cards():
     cards = {"hello": make_card()}
     states = {"hello": state_for("hello", "2026-10-21T08:55:00+00:00", notifiable=False)}
     assert scheduler.pending_occurrences(cards, states, NOW) == []
+
+
+def test_a_card_without_a_state_has_no_scheduled_review():
+    cards = {"hello": make_card()}
+    assert scheduler.pending_occurrences(cards, {}, NOW) == []
+    assert scheduler.next_wakeup(cards, {}, NOW) is None
+
+
+def test_a_card_without_a_state_does_not_suppress_a_card_that_is_due():
+    cards = {
+        "fresh": make_card("fresh", created_at="2026-10-21T08:58:00+00:00"),
+        "due": make_card("due"),
+    }
+    states = {"due": state_for("due", "2026-10-21T08:55:00+00:00")}
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    reminder = scheduler.plan_reminder(pending, NOW)
+    assert [occurrence.card.id for occurrence in reminder.group] == ["due"]
+    assert reminder.skipped == ()
 
 
 def test_next_wakeup_returns_the_soonest_future_occurrence():
@@ -1851,6 +2132,24 @@ def test_next_wakeup_is_none_without_a_future_occurrence():
     assert scheduler.next_wakeup(cards, states, NOW) is None
 
 
+def test_a_relearn_card_does_not_produce_a_wakeup():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T12:00:00+00:00", notifiable=False)}
+    assert scheduler.next_wakeup(cards, states, NOW) is None
+
+
+def test_an_already_handled_occurrence_does_not_produce_a_wakeup():
+    cards = {"hello": make_card()}
+    states = {
+        "hello": state_for(
+            "hello",
+            "2026-10-21T12:00:00+00:00",
+            handled_due="2026-10-21T12:00:00+00:00",
+        )
+    }
+    assert scheduler.next_wakeup(cards, states, NOW) is None
+
+
 def test_the_latest_overdue_reminder_within_the_grace_window_is_selected():
     cards = {"old": make_card("old"), "late": make_card("late")}
     states = {
@@ -1861,6 +2160,16 @@ def test_the_latest_overdue_reminder_within_the_grace_window_is_selected():
     reminder = scheduler.plan_reminder(pending, NOW)
     assert [occurrence.card.id for occurrence in reminder.group] == ["late"]
     assert [occurrence.card.id for occurrence in reminder.skipped] == ["old"]
+    assert reminder.due == datetime(2026, 10, 21, 8, 55, tzinfo=timezone.utc)
+
+
+def test_a_reminder_that_is_exactly_at_the_grace_limit_is_delivered():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:45:00+00:00")}
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    reminder = scheduler.plan_reminder(pending, NOW)
+    assert [occurrence.card.id for occurrence in reminder.group] == ["hello"]
+    assert reminder.skipped == ()
 
 
 def test_older_reminders_are_never_replayed():
@@ -1904,6 +2213,13 @@ def test_a_broken_due_falls_back_to_the_creation_time():
     states = {"hello": state_for("hello", "not a timestamp")}
     due = scheduler.occurrence_due(cards["hello"], states["hello"], NOW)
     assert due == datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
+
+
+def test_the_due_iso_of_an_occurrence_round_trips():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:00:00+00:00")}
+    pending = scheduler.pending_occurrences(cards, states, NOW)
+    assert models.safe_parse_iso(pending[0].due_iso) == pending[0].due
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -1978,6 +2294,28 @@ def occurrence_due(
     return moment
 
 
+def _scheduled_review(
+    card: models.Card,
+    state: models.CardState | None,
+    moment: datetime,
+) -> Occurrence | None:
+    """Return the scheduled review of a card, or None when it has none.
+
+    A card without a state has no scheduled review: it is never due, it never
+    wakes the scheduler up and it is never reminded. The relearn step of an
+    "again" grade is not notifiable, so it is not reminded either. An
+    occurrence that was already acted on is not a review any more.
+    """
+    if state is None or not state.notifiable:
+        return None
+    due = occurrence_due(card, state, moment)
+    if state.handled_due:
+        handled = models.safe_parse_iso(state.handled_due)
+        if handled is not None and handled == due:
+            return None
+    return Occurrence(card=card, due=due, state=state)
+
+
 def pending_occurrences(
     cards: Mapping[str, models.Card],
     states: Mapping[str, models.CardState],
@@ -1986,18 +2324,10 @@ def pending_occurrences(
     """Return the occurrences that are due and that were not acted on yet."""
     pending: list[Occurrence] = []
     for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        if state is not None and not state.notifiable:
+        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
+        if occurrence is None or occurrence.due > moment:
             continue
-        due = occurrence_due(card, state, moment)
-        if due > moment:
-            continue
-        if state is not None and state.handled_due:
-            handled = models.safe_parse_iso(state.handled_due)
-            if handled is not None and handled == due:
-                continue
-        pending.append(Occurrence(card=card, due=due, state=state))
+        pending.append(occurrence)
     return pending
 
 
@@ -2009,18 +2339,10 @@ def next_wakeup(
     """Return the exact time of the next occurrence worth waking up for."""
     candidates: list[datetime] = []
     for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        if state is None or not state.notifiable:
+        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
+        if occurrence is None or occurrence.due <= moment:
             continue
-        due = occurrence_due(card, state, moment)
-        if due <= moment:
-            continue
-        if state.handled_due:
-            handled = models.safe_parse_iso(state.handled_due)
-            if handled is not None and handled == due:
-                continue
-        candidates.append(due)
+        candidates.append(occurrence.due)
     return min(candidates) if candidates else None
 
 
@@ -2041,7 +2363,7 @@ def plan_reminder(pending: Iterable[Occurrence], moment: datetime) -> Reminder |
 
 Run: `python3 -m pytest tests/test_scheduler.py -v`
 
-Expected: PASS, 12 tests.
+Expected: PASS, 19 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -2087,8 +2409,10 @@ def make_card(card_id="hello", created_at="2026-10-20T09:00:00+00:00"):
     )
 
 
-def state_for(card_id, due):
-    return models.CardState(card_id=card_id, due=due)
+def state_for(card_id, due, **overrides):
+    data = {"card_id": card_id, "due": due}
+    data.update(overrides)
+    return models.CardState(**data)
 
 
 def test_due_cards_orders_the_most_overdue_card_first():
@@ -2106,10 +2430,44 @@ def test_due_cards_ignores_cards_that_are_not_due():
     assert review.due_cards(cards, states, NOW) == []
 
 
+def test_due_cards_holds_a_card_without_a_state():
+    cards = {"hello": make_card(created_at="2026-10-21T08:00:00+00:00")}
+    assert [card.id for card in review.due_cards(cards, {}, NOW)] == ["hello"]
+
+
+def test_due_cards_holds_a_relearn_card():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:55:00+00:00", notifiable=False)}
+    assert [card.id for card in review.due_cards(cards, states, NOW)] == ["hello"]
+
+
+def test_a_card_created_in_the_future_is_not_due():
+    cards = {"hello": make_card(created_at="2026-10-21T10:00:00+00:00")}
+    assert review.due_cards(cards, {}, NOW) == []
+    card, when = review.next_due(cards, {}, NOW)
+    assert card.id == "hello"
+    assert when == datetime(2026, 10, 21, 10, 0, tzinfo=timezone.utc)
+
+
+def test_current_card_returns_the_most_overdue_card():
+    cards = {"later": make_card("later"), "earlier": make_card("earlier")}
+    states = {
+        "later": state_for("later", "2026-10-21T08:50:00+00:00"),
+        "earlier": state_for("earlier", "2026-10-21T08:00:00+00:00"),
+    }
+    assert review.current_card(cards, states, NOW).id == "earlier"
+
+
 def test_current_card_returns_none_when_nothing_is_due():
     cards = {"hello": make_card()}
     states = {"hello": state_for("hello", "2026-10-21T10:00:00+00:00")}
     assert review.current_card(cards, states, NOW) is None
+
+
+def test_next_due_is_none_when_nothing_is_scheduled():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:00:00+00:00")}
+    assert review.next_due(cards, states, NOW) is None
 
 
 def test_next_due_reports_the_soonest_future_card():
@@ -2151,6 +2509,23 @@ def test_render_card_puts_the_requested_language_first():
     assert output.index("zh:") < output.index("ar:")
 
 
+def test_render_card_falls_back_to_the_sorted_languages():
+    output = review.render_card(make_card(), reveal=True, target_lang="fr")
+    assert output.index("ar:") < output.index("zh:")
+
+
+def test_render_card_isolates_a_right_to_left_id():
+    output = review.render_card(make_card(card_id="مرحبا"))
+    assert output.splitlines()[0] == "⁧مرحبا⁩  [greetings]"
+
+
+def test_render_card_isolates_right_to_left_tags():
+    card = make_card()
+    card.tags = ["تحية"]
+    output = review.render_card(card)
+    assert output.splitlines()[0] == "hello  [⁧تحية⁩]"
+
+
 def test_render_card_shows_the_position_and_the_id():
     output = review.render_card(make_card(), index=2, total=7)
     assert output.splitlines()[0] == "2 of 7  (hello)  [greetings]"
@@ -2177,21 +2552,33 @@ from typing import Mapping
 from . import models, scheduler, text
 
 
+def _due_entries(
+    cards: Mapping[str, models.Card],
+    states: Mapping[str, models.CardState],
+    moment: datetime,
+) -> list[tuple[datetime, str, models.Card]]:
+    """Return the due time, the id and the card of every card, the earliest due first.
+
+    The card id breaks the tie, so two cards that are due at the same moment always
+    keep the same order.
+    """
+    entries = [
+        (scheduler.occurrence_due(card, states.get(card_id), moment), card_id, card)
+        for card_id, card in cards.items()
+    ]
+    entries.sort(key=lambda entry: (entry[0], entry[1]))
+    return entries
+
+
 def due_cards(
     cards: Mapping[str, models.Card],
     states: Mapping[str, models.CardState],
     moment: datetime,
 ) -> list[models.Card]:
     """Return the cards that are due, the most overdue one first."""
-    entries: list[tuple[datetime, str, models.Card]] = []
-    for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        due = scheduler.occurrence_due(card, state, moment)
-        if due <= moment:
-            entries.append((due, card_id, card))
-    entries.sort(key=lambda entry: (entry[0], entry[1]))
-    return [entry[2] for entry in entries]
+    return [
+        card for due, _, card in _due_entries(cards, states, moment) if due <= moment
+    ]
 
 
 def current_card(
@@ -2200,8 +2587,10 @@ def current_card(
     moment: datetime,
 ) -> models.Card | None:
     """Return the card to review next, or None when nothing is due."""
-    due = due_cards(cards, states, moment)
-    return due[0] if due else None
+    for due, _, card in _due_entries(cards, states, moment):
+        if due <= moment:
+            return card
+    return None
 
 
 def next_due(
@@ -2210,17 +2599,10 @@ def next_due(
     moment: datetime,
 ) -> tuple[models.Card, datetime] | None:
     """Return the soonest card that is not due yet."""
-    entries: list[tuple[datetime, str, models.Card]] = []
-    for card_id in sorted(cards):
-        card = cards[card_id]
-        state = states.get(card_id)
-        due = scheduler.occurrence_due(card, state, moment)
+    for due, _, card in _due_entries(cards, states, moment):
         if due > moment:
-            entries.append((due, card_id, card))
-    if not entries:
-        return None
-    entries.sort(key=lambda entry: (entry[0], entry[1]))
-    return entries[0][2], entries[0][0]
+            return card, due
+    return None
 
 
 def render_card(
@@ -2233,11 +2615,13 @@ def render_card(
 ) -> str:
     """Render a card for the terminal."""
     lines: list[str] = []
-    heading = card.id
+    identifier = text.isolate(card.id)
+    heading = identifier
     if index is not None and total is not None:
-        heading = f"{index} of {total}  ({card.id})"
+        heading = f"{index} of {total}  ({identifier})"
     if card.tags:
-        heading = f"{heading}  [{', '.join(card.tags)}]"
+        tags = ", ".join(text.isolate(tag) for tag in card.tags)
+        heading = f"{heading}  [{tags}]"
     lines.append(heading)
     lines.append("")
     lines.append(f"{card.source_lang}: {text.isolate(card.term)}")
@@ -2259,7 +2643,7 @@ def render_card(
 
 Run: `python3 -m pytest tests/test_review.py -v`
 
-Expected: PASS, 10 tests.
+Expected: PASS, 18 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -2279,17 +2663,32 @@ git commit -m "feat: add card selection and terminal rendering"
 
 **Interfaces:**
 - Consumes: `config.load_config` from Task 6, `models` from Task 4, `paths` from Task 3, `review` from Task 9, `srs` from Task 5, `store` from Task 3.
-- Produces: `cli.main(argv) -> int`, `cli.build_parser()`, `cli.format_local(moment) -> str`, `cli.command_show(args)`, `cli.command_next(args)`, `cli.command_history(args)`, `cli.command_status(args)`, `cli.command_validate(args)`.
+- Produces: `cli.main(argv) -> int`, `cli.build_parser()`, `cli.format_local(moment) -> str`, `cli.local_stamp(value) -> str`, `cli.plural(count, singular, plural_form=None) -> str`, `cli.load_session()`, `cli.resolve_language(language, fallback)`, `cli.report_nothing_due(cards, states, moment)`, `cli.command_show(args)`, `cli.command_next(args)`, `cli.command_history(args)`, `cli.command_status(args)`, `cli.command_validate(args)`.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_cli.py`:
 
 ```python
-from linguapulse import cli, models, paths, store
+from datetime import datetime
+
+from conftest import (
+    make_card,
+    write_broken_deck,
+    write_deck,
+    write_malformed_deck,
+    write_malformed_states,
+    write_states,
+)
+from linguapulse import cli, config, daemon, models, paths, srs, store
 
 PAST = "2020-01-01T09:00:00+00:00"
 FUTURE = "2099-01-01T09:00:00+00:00"
+
+
+def test_format_local_reads_a_naive_timestamp_as_utc(monkeypatch):
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    assert cli.format_local(datetime(2026, 10, 22, 9, 0)) == "2026-10-22 17:00 CST"
 
 
 def test_show_prints_the_due_card_without_the_answer(home, capsys):
@@ -2315,6 +2714,70 @@ def test_show_reports_when_nothing_is_due(home, capsys):
     assert "Nothing is due" in capsys.readouterr().out
 
 
+def test_show_uses_the_requested_language_without_storing_it(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["show", "--reveal", "--lang", "zh"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("zh:") < out.index("ar:")
+    assert config.load_config().target_lang == "ar"
+
+
+def test_show_shows_the_requested_number_of_cards(home, capsys):
+    write_deck([make_card("hello"), make_card("world")])
+    write_states(
+        {
+            "hello": models.CardState(card_id="hello", due=PAST),
+            "world": models.CardState(card_id="world", due=PAST),
+        }
+    )
+    assert cli.main(["show", "--count", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "1 of 2" in out
+    assert "2 of 2" in out
+
+
+def test_show_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
+
+
+def test_show_reports_a_broken_state_file(home, capsys):
+    write_deck([make_card()])
+    paths.state_path().write_text("{", encoding="utf-8")
+    assert cli.main(["show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
+
+
+def test_show_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["show"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
+
+
+def test_show_rejects_an_unknown_language(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["show", "--lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "error: unknown language 'xx', the supported languages are "
+        "ar, en, es, fr, tr, zh" in captured.err
+    )
+
+
 def test_next_grades_the_due_card_and_records_the_review(home, capsys):
     write_deck([make_card()])
     write_states({"hello": models.CardState(card_id="hello", due=PAST)})
@@ -2327,11 +2790,72 @@ def test_next_grades_the_due_card_and_records_the_review(home, capsys):
     assert entries[-1]["grade"] == "good"
 
 
+def test_a_daemon_mark_saved_during_a_grade_survives(home, capsys, monkeypatch):
+    write_deck([make_card("hello"), make_card("later")])
+    write_states(
+        {
+            "hello": models.CardState(card_id="hello", due=PAST),
+            "later": models.CardState(card_id="later", due=PAST),
+        }
+    )
+    original = srs.apply_grade
+
+    def grade_after_the_daemon_marks(state, grade, moment=None, zone=None):
+        daemon._save_marks([("later", PAST)])
+        return original(state, grade, moment, zone)
+
+    monkeypatch.setattr(cli.srs, "apply_grade", grade_after_the_daemon_marks)
+    assert cli.main(["next", "good"]) == 0
+    states = models.load_states(paths.state_path())
+    assert states["later"].handled_due == PAST
+    assert states["hello"].reps == 1
+
+
 def test_next_reports_when_nothing_is_due(home, capsys):
     write_deck([make_card()])
     write_states({"hello": models.CardState(card_id="hello", due=FUTURE)})
     assert cli.main(["next", "good"]) == 0
     assert "Nothing is due" in capsys.readouterr().out
+
+
+def test_next_hides_the_translations_on_request(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["next", "good", "--hide"]) == 0
+    out = capsys.readouterr().out
+    assert "مرحبا" not in out
+    assert "Graded 'good'" in out
+
+
+def test_next_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["next", "good"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
+
+
+def test_next_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["next", "good"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
+
+
+def test_next_rejects_an_unknown_language(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    assert cli.main(["next", "good", "--lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "error: unknown language 'xx', the supported languages are "
+        "ar, en, es, fr, tr, zh" in captured.err
+    )
 
 
 def test_history_lists_the_recorded_reviews(home, capsys):
@@ -2354,12 +2878,86 @@ def test_history_filters_by_card(home, capsys):
     assert "No reviews" in capsys.readouterr().out
 
 
+def test_history_limits_the_number_of_entries(home, capsys):
+    write_deck([make_card()])
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    cli.main(["next", "good"])
+    capsys.readouterr()
+    write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    cli.main(["next", "good"])
+    capsys.readouterr()
+    assert cli.main(["history", "--limit", "1"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len([line for line in lines if "good" in line]) == 1
+
+
+def test_history_prints_the_local_time(home, capsys, monkeypatch):
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    store.append_jsonl(
+        paths.history_path(),
+        {
+            "ts": "2020-01-01T09:00:00+00:00",
+            "card_id": "hello",
+            "grade": "good",
+            "due": "2020-01-02T09:00:00+00:00",
+        },
+    )
+    assert cli.main(["history"]) == 0
+    out = capsys.readouterr().out
+    assert "2020-01-01 17:00 CST" in out
+    assert "2020-01-02 17:00 CST" in out
+    assert "2020-01-01T09:00:00+00:00" not in out
+
+
+def test_history_keeps_a_broken_timestamp(home, capsys):
+    paths.history_path().write_text(
+        '{"ts": "not a time", "card_id": "hello", "grade": "good"}\n', encoding="utf-8"
+    )
+    assert cli.main(["history"]) == 0
+    assert "not a time" in capsys.readouterr().out
+
+
 def test_status_reports_the_deck_size(home, capsys):
     write_deck([make_card()])
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert "1 card" in out
     assert "Time zone" in out
+
+
+def test_status_reports_the_due_cards_the_next_card_and_the_languages(home, capsys):
+    write_deck([make_card("hello"), make_card("later")])
+    write_states(
+        {
+            "hello": models.CardState(card_id="hello", due=PAST),
+            "later": models.CardState(card_id="later", due=FUTURE),
+        }
+    )
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "2 cards" in out
+    assert "1 card" in out
+    assert "later" in out
+    assert "Languages: source en, target ar" in out
+
+
+def test_status_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["status"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "is not valid JSON" in captured.err
+
+
+def test_status_reports_a_malformed_state_file(home, capsys):
+    write_deck([make_card()])
+    write_malformed_states()
+    assert cli.main(["status"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+    assert "NoneType" in captured.err
 
 
 def test_validate_accepts_a_clean_deck(home, capsys):
@@ -2381,6 +2979,24 @@ def test_validate_reports_a_broken_card(home, capsys):
 def test_validate_reports_a_missing_deck(home, capsys):
     assert cli.main(["validate"]) == 1
     assert "No deck file" in capsys.readouterr().out
+
+
+def test_validate_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["validate"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "problem:" in captured.out
+    assert "is not valid JSON" in captured.out
+
+
+def test_validate_reports_a_malformed_deck_file(home, capsys):
+    write_malformed_deck()
+    assert cli.main(["validate"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "problem: 'int' object is not iterable" in captured.out
+    assert "1 problem found." in captured.out
 ```
 
 Add the shared fixtures and helpers to `tests/conftest.py`:
@@ -2416,6 +3032,29 @@ def write_deck(cards):
     models.save_deck(paths.deck_path(), {card.id: card for card in cards})
 
 
+def write_broken_deck():
+    """Write a deck file that is not valid JSON."""
+    paths.deck_path().write_text('{"version": 1, "cards": {', encoding="utf-8")
+
+
+def write_malformed_deck():
+    """Write a deck file that is valid JSON but holds a wrongly typed field."""
+    paths.deck_path().write_text(
+        '{"version": 1, "cards": {"hello": {"id": "hello", "term": "hello", '
+        '"source_lang": "en", "translations": {"ar": "مرحبا"}, "tags": 5}}}\n',
+        encoding="utf-8",
+    )
+
+
+def write_malformed_states():
+    """Write a state file that is valid JSON but holds a wrongly typed field."""
+    paths.state_path().write_text(
+        '{"version": 1, "cards": {"hello": {"card_id": "hello", '
+        '"due": "2020-01-01T09:00:00+00:00", "reps": null}}}\n',
+        encoding="utf-8",
+    )
+
+
 def write_states(states):
     """Write card states to the state file."""
     models.save_states(paths.state_path(), states)
@@ -2424,7 +3063,14 @@ def write_states(states):
 Add this import at the top of `tests/test_cli.py`, so that the file uses the shared helpers:
 
 ```python
-from conftest import make_card, write_deck, write_states
+from conftest import (
+    make_card,
+    write_broken_deck,
+    write_deck,
+    write_malformed_deck,
+    write_malformed_states,
+    write_states,
+)
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -2447,14 +3093,32 @@ entry to the parser and one entry to the dispatch table.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+import sys
+from datetime import datetime, timezone
 
 from . import __version__, config, models, paths, review, srs, store
 
 
 def format_local(moment: datetime) -> str:
-    """Format a timestamp in the local time zone."""
+    """Format a timestamp in the local time zone.
+
+    A timestamp without a time zone is read as UTC, the way `models.parse_iso`
+    reads it, so that the two agree on what a naive timestamp means.
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
     return moment.astimezone(models.local_zone()).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def local_stamp(value: str | None) -> str:
+    """Format a stored timestamp in the local time zone.
+
+    A timestamp that cannot be parsed is shown the way it is stored.
+    """
+    moment = models.safe_parse_iso(value or "")
+    if moment is None:
+        return value or "?"
+    return format_local(moment)
 
 
 def plural(count: int, singular: str, plural_form: str | None = None) -> str:
@@ -2462,6 +3126,59 @@ def plural(count: int, singular: str, plural_form: str | None = None) -> str:
     if count == 1:
         return f"{count} {singular}"
     return f"{count} {plural_form or singular + 's'}"
+
+
+def load_session() -> tuple[
+    config.Config,
+    dict[str, models.Card],
+    dict[str, models.CardState],
+    datetime,
+] | None:
+    """Load the configuration, the deck, the states and the current moment.
+
+    None is returned and the problem is reported on stderr when the deck file
+    or the state file cannot be read or holds a malformed value.
+    """
+    paths.ensure_dirs()
+    settings = config.load_config()
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except (ValueError, TypeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
+    return settings, cards, states, models.now_utc()
+
+
+def resolve_language(language: str | None, fallback: str) -> str | None:
+    """Return the language to show first, or None when it is not supported.
+
+    The problem is reported on stderr when the requested language is unknown.
+    """
+    if language is None:
+        return fallback
+    if language in models.SUPPORTED_LANGUAGES:
+        return language
+    supported = ", ".join(models.SUPPORTED_LANGUAGES)
+    print(
+        f"error: unknown language {language!r}, the supported languages are {supported}",
+        file=sys.stderr,
+    )
+    return None
+
+
+def report_nothing_due(
+    cards: dict[str, models.Card],
+    states: dict[str, models.CardState],
+    moment: datetime,
+) -> None:
+    """Report that no card is due and name the next scheduled card."""
+    upcoming = review.next_due(cards, states, moment)
+    if upcoming is None:
+        print("Nothing is due right now, and no card is scheduled.")
+    else:
+        _, when = upcoming
+        print(f"Nothing is due right now. Next card at {format_local(when)}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2495,22 +3212,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def command_show(args: argparse.Namespace) -> int:
     """Print the cards that are due."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
+    target = resolve_language(args.lang, settings.target_lang)
+    if target is None:
+        return 2
     due = review.due_cards(cards, states, moment)
     if not due:
-        upcoming = review.next_due(cards, states, moment)
-        if upcoming is None:
-            print("Nothing is due right now, and no card is scheduled.")
-        else:
-            _, when = upcoming
-            print(f"Nothing is due right now. Next card at {format_local(when)}.")
+        report_nothing_due(cards, states, moment)
         return 0
     count = max(1, args.count)
-    target = args.lang or settings.target_lang
     shown = due[:count]
     for index, card in enumerate(shown, start=1):
         print(
@@ -2528,27 +3241,25 @@ def command_show(args: argparse.Namespace) -> int:
 
 def command_next(args: argparse.Namespace) -> int:
     """Grade the card that is due and record the review."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
+    target = resolve_language(args.lang, settings.target_lang)
+    if target is None:
+        return 2
     card = review.current_card(cards, states, moment)
     if card is None:
-        upcoming = review.next_due(cards, states, moment)
-        if upcoming is None:
-            print("Nothing is due right now, and no card is scheduled.")
-        else:
-            _, when = upcoming
-            print(f"Nothing is due right now. Next card at {format_local(when)}.")
+        report_nothing_due(cards, states, moment)
         return 0
     state = states.get(card.id) or srs.new_state(card.id, moment)
-    target = args.lang or settings.target_lang
     print(review.render_card(card, target_lang=target, reveal=not args.hide))
     print()
     updated = srs.apply_grade(state, args.grade, moment)
-    states[card.id] = updated
-    models.save_states(paths.state_path(), states)
+    with store.state_lock():
+        current = models.load_states(paths.state_path())
+        current[card.id] = updated
+        models.save_states(paths.state_path(), current)
     store.append_jsonl(
         paths.history_path(),
         {
@@ -2561,6 +3272,7 @@ def command_next(args: argparse.Namespace) -> int:
         },
     )
     print(f"Graded '{args.grade}'. Next review {format_local(updated.due_dt())}.")
+    daemon.signal_scheduler()
     return 0
 
 
@@ -2575,19 +3287,18 @@ def command_history(args: argparse.Namespace) -> int:
         return 0
     for entry in entries:
         print(
-            f"{entry.get('ts', '?')}  {entry.get('card_id', '?')}  "
-            f"{entry.get('grade', '?')}  -> {entry.get('due', '?')}"
+            f"{local_stamp(entry.get('ts'))}  {entry.get('card_id', '?')}  "
+            f"{entry.get('grade', '?')}  -> {local_stamp(entry.get('due'))}"
         )
     return 0
 
 
 def command_status(args: argparse.Namespace) -> int:
     """Print the deck, the schedule and the local configuration."""
-    paths.ensure_dirs()
-    settings = config.load_config()
-    cards = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    moment = models.now_utc()
+    loaded = load_session()
+    if loaded is None:
+        return 1
+    settings, cards, states, moment = loaded
     due = review.due_cards(cards, states, moment)
     upcoming = review.next_due(cards, states, moment)
     print(f"lingua-pulse {__version__}")
@@ -2607,7 +3318,12 @@ def command_status(args: argparse.Namespace) -> int:
 def command_validate(args: argparse.Namespace) -> int:
     """Check the deck file and report every problem."""
     path = paths.deck_path()
-    raw = store.read_json(path, None)
+    try:
+        raw = store.read_json(path, None)
+    except ValueError as error:
+        print(f"problem: {error}")
+        print(f"{plural(1, 'problem')} found.")
+        return 1
     if raw is None:
         print(f"No deck file at {path}")
         return 1
@@ -2617,7 +3333,13 @@ def command_validate(args: argparse.Namespace) -> int:
     if problems:
         print(f"{plural(len(problems), 'problem')} found.")
         return 1
-    print(f"{plural(len(models.load_deck(path)), 'card')}, no problems found.")
+    try:
+        cards = models.load_deck(path)
+    except (ValueError, TypeError) as error:
+        print(f"problem: {error}")
+        print(f"{plural(1, 'problem')} found.")
+        return 1
+    print(f"{plural(len(cards), 'card')}, no problems found.")
     return 0
 
 
@@ -2642,7 +3364,7 @@ def main(argv: list[str] | None = None) -> int:
 
 Run: `python3 -m pytest tests/test_cli.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 31 tests.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -2662,7 +3384,7 @@ git commit -m "feat: add the review commands to the cli"
 
 **Interfaces:**
 - Consumes: `config` from Task 6, `models` from Task 4, `paths` from Task 3, `srs` from Task 5, `text.normalize` from Task 2.
-- Produces: `cli.command_add(args)`, `cli.command_list(args)`, `cli.command_seed(args)`, `cli.command_config(args)`, `cli.seed_cards(limit=None) -> list[models.Card]`.
+- Produces: `cli.command_add(args)`, `cli.command_list(args)`, `cli.command_seed(args)`, `cli.command_config(args)`, `cli.seed_cards(limit=None) -> list[models.Card]`, `cli.load_deck_and_states() -> tuple[dict[str, models.Card], dict[str, models.CardState]] | None`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2671,6 +3393,7 @@ Create `tests/test_cli_deck.py`:
 ```python
 import json
 
+from conftest import write_broken_deck
 from linguapulse import cli, models, paths
 
 
@@ -2712,6 +3435,52 @@ def test_add_creates_a_due_state(home, capsys):
     assert len(states) == 1
 
 
+def test_add_rejects_an_unknown_translation_language(home, capsys):
+    assert cli.main(["add", "--term", "hello", "--lang", "de", "--text", "hallo"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "unknown language 'de'" in captured.err
+    assert not paths.deck_path().exists()
+
+
+def test_add_rejects_an_unknown_source_language(home, capsys):
+    assert (
+        cli.main(
+            ["add", "--term", "hello", "--source-lang", "xx", "--lang", "ar", "--text", "مرحبا"]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "unknown language 'xx'" in captured.err
+    assert not paths.deck_path().exists()
+
+
+def test_add_rejects_an_empty_term(home, capsys):
+    assert cli.main(["add", "--term", "  ", "--lang", "ar", "--text", "مرحبا"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "term" in captured.err
+    assert not paths.deck_path().exists()
+
+
+def test_add_rejects_an_empty_translation(home, capsys):
+    assert cli.main(["add", "--term", "hello", "--lang", "ar", "--text", " "]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "translation" in captured.err
+    assert not paths.deck_path().exists()
+
+
+def test_add_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["add", "--term", "new", "--lang", "ar", "--text", "جديد"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert captured.out == ""
+    assert paths.deck_path().read_text(encoding="utf-8").startswith('{"version": 1, "cards": {')
+
+
 def test_list_prints_the_cards(home, capsys):
     cli.main(["add", "--term", "hello", "--lang", "ar", "--text", "مرحبا"])
     capsys.readouterr()
@@ -2719,6 +3488,24 @@ def test_list_prints_the_cards(home, capsys):
     out = capsys.readouterr().out
     assert "hello" in out
     assert "مرحبا" in out
+
+
+def test_list_rejects_an_unknown_language(home, capsys):
+    cli.main(["add", "--term", "hello", "--lang", "ar", "--text", "مرحبا"])
+    capsys.readouterr()
+    assert cli.main(["list", "--lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "unknown language 'xx'" in captured.err
+    assert captured.out == ""
+
+
+def test_list_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["list"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert captured.out == ""
 
 
 def test_seed_adds_the_bundled_cards(home, capsys):
@@ -2733,6 +3520,24 @@ def test_seed_does_not_duplicate_cards(home, capsys):
     assert cli.main(["seed"]) == 0
     assert "0" in capsys.readouterr().out
     assert len(models.load_deck(paths.deck_path())) == len(cli.seed_cards())
+
+
+def test_seed_wakes_the_scheduler_when_it_added_cards(home, capsys, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.daemon, "signal_scheduler", lambda: calls.append(True))
+    assert cli.main(["seed"]) == 0
+    assert calls == [True]
+    capsys.readouterr()
+    assert cli.main(["seed"]) == 0
+    assert calls == [True]
+
+
+def test_seed_reports_a_broken_deck_file(home, capsys):
+    write_broken_deck()
+    assert cli.main(["seed"]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert captured.out == ""
 
 
 def test_the_bundled_seed_cards_are_valid(home):
@@ -2752,13 +3557,30 @@ def test_config_updates_the_settings(home, capsys):
     capsys.readouterr()
     assert cli.main(["config"]) == 0
     assert "zh" in capsys.readouterr().out
+
+
+def test_config_rejects_an_unknown_language(home, capsys):
+    assert cli.main(["config", "--target-lang", "zh"]) == 0
+    capsys.readouterr()
+    assert cli.main(["config", "--source-lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "error: unknown language 'xx', the supported languages are ar, en, es, fr, tr, zh\n"
+    )
+    assert captured.out == ""
+    assert cli.main(["config", "--target-lang", "yy"]) == 2
+    assert "unknown language 'yy'" in capsys.readouterr().err
+    assert cli.main(["config"]) == 0
+    out = capsys.readouterr().out
+    assert "source_lang = en" in out
+    assert "target_lang = zh" in out
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m pytest tests/test_cli_deck.py -v`
 
-Expected: FAIL because the parser does not know the `add` command yet.
+Expected: FAIL, 15 tests, because the parser does not know the `add` command yet.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -2872,23 +3694,31 @@ Create `src/linguapulse/seed_deck.json`:
 }
 ```
 
-Extend `src/linguapulse/cli.py`:
+Extend `src/linguapulse/cli.py`.
 
-Add these imports at the top:
+The import header becomes:
 
 ```python
+import argparse
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from importlib import resources
+
+from . import __version__, config, models, paths, review, srs, store, text
 ```
 
-Add these helpers after `plural`:
+Add these helpers after `plural`, and make `load_session` load the deck and the states through `load_deck_and_states`, so every command that reads them reports a broken file the same way:
 
 ```python
 def seed_cards(limit: int | None = None) -> list[models.Card]:
     """Return the bundled seed cards."""
-    raw = resources.files("linguapulse").joinpath("seed_deck.json").read_text(encoding="utf-8")
+    raw = (
+        resources.files("linguapulse")
+        .joinpath("seed_deck.json")
+        .read_text(encoding="utf-8")
+    )
     document = json.loads(raw)
     cards = [models.Card.from_dict(entry) for entry in document.get("cards", {}).values()]
     return cards[:limit] if limit else cards
@@ -2897,16 +3727,29 @@ def seed_cards(limit: int | None = None) -> list[models.Card]:
 def card_id_for(term: str) -> str:
     """Return a stable identifier for a term."""
     normalized = text.normalize(term).strip().lower()
-    if normalized and all(character.isascii() and (character.isalnum() or character in "-_") for character in normalized):
+    plain = all(
+        character.isascii() and (character.isalnum() or character in "-_")
+        for character in normalized
+    )
+    if normalized and plain:
         return normalized.replace(" ", "-")
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:10]
     return f"card-{digest}"
-```
 
-Add `text` to the package imports, so that the line reads:
 
-```python
-from . import __version__, config, models, paths, review, srs, store, text
+def load_deck_and_states() -> tuple[dict[str, models.Card], dict[str, models.CardState]] | None:
+    """Load the deck and the states.
+
+    None is returned and the problem is reported on stderr when the deck file
+    or the state file cannot be read or holds a malformed value.
+    """
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except (ValueError, TypeError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None
+    return cards, states
 ```
 
 Register the commands in `build_parser`:
@@ -2916,8 +3759,12 @@ Register the commands in `build_parser`:
     add.add_argument("--id", help="identifier of the card")
     add.add_argument("--term", required=True, help="the word to learn")
     add.add_argument("--source-lang", help="language of the term")
-    add.add_argument("--lang", action="append", required=True, metavar="LANG", help="language of a translation")
-    add.add_argument("--text", action="append", required=True, metavar="TEXT", help="a translation")
+    add.add_argument(
+        "--lang", action="append", required=True, metavar="LANG", help="language of a translation"
+    )
+    add.add_argument(
+        "--text", action="append", required=True, metavar="TEXT", help="a translation"
+    )
     add.add_argument("--pinyin", help="pinyin of the chinese translation")
     add.add_argument("--note", help="a note that is shown with the answer")
     add.add_argument("--tag", action="append", default=[], help="a tag for the card")
@@ -2932,11 +3779,15 @@ Register the commands in `build_parser`:
     config_parser = commands.add_parser("config", help="show or change the preferences")
     config_parser.add_argument("--source-lang", help="language of the term")
     config_parser.add_argument("--target-lang", help="language that is shown first")
-    config_parser.add_argument("--notify", dest="notify", action="store_true", default=None, help="enable notifications")
-    config_parser.add_argument("--no-notify", dest="notify", action="store_false", help="disable notifications")
+    config_parser.add_argument(
+        "--notify", dest="notify", action="store_true", default=None, help="enable notifications"
+    )
+    config_parser.add_argument(
+        "--no-notify", dest="notify", action="store_false", help="disable notifications"
+    )
 ```
 
-Add the command implementations:
+Add the command implementations. `command_config` validates `--source-lang` and `--target-lang` with `resolve_language` before saving anything; `command_add`, `command_list` and `command_seed` load the deck and the states through `load_deck_and_states`, so a broken file is reported on stderr and returns 1:
 
 ```python
 def command_add(args: argparse.Namespace) -> int:
@@ -2946,18 +3797,33 @@ def command_add(args: argparse.Namespace) -> int:
         print("error: every --lang needs exactly one --text", file=sys.stderr)
         return 2
     settings = config.load_config()
-    source_lang = args.source_lang or settings.source_lang
-    card_id = args.id or card_id_for(args.term)
-    deck = models.load_deck(paths.deck_path())
-    if card_id in deck:
-        print(f"error: a card with the id '{card_id}' already exists", file=sys.stderr)
-        return 1
+    source_lang = resolve_language(args.source_lang, settings.source_lang)
+    if source_lang is None:
+        return 2
+    for language in args.lang:
+        if resolve_language(language, language) is None:
+            return 2
+    term = text.normalize(args.term)
+    if not term.strip():
+        print("error: the term must not be empty", file=sys.stderr)
+        return 2
     translations = {
         language: text.normalize(value) for language, value in zip(args.lang, args.text)
     }
+    if any(not value.strip() for value in translations.values()):
+        print("error: a translation must not be empty", file=sys.stderr)
+        return 2
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, _ = loaded
+    card_id = args.id or card_id_for(term)
+    if card_id in deck:
+        print(f"error: a card with the id '{card_id}' already exists", file=sys.stderr)
+        return 1
     card = models.Card(
         id=card_id,
-        term=text.normalize(args.term),
+        term=term,
         source_lang=source_lang,
         translations=translations,
         pinyin=text.normalize(args.pinyin) if args.pinyin else "",
@@ -2967,18 +3833,24 @@ def command_add(args: argparse.Namespace) -> int:
     )
     deck[card.id] = card
     models.save_deck(paths.deck_path(), deck)
-    states = models.load_states(paths.state_path())
-    if card.id not in states:
-        states[card.id] = srs.new_state(card.id, models.now_utc())
-        models.save_states(paths.state_path(), states)
+    with store.state_lock():
+        current = models.load_states(paths.state_path())
+        current.setdefault(card.id, srs.new_state(card.id, models.now_utc()))
+        models.save_states(paths.state_path(), current)
     print(f"Added '{card.id}' ({card.source_lang} -> {', '.join(sorted(card.translations))}).")
+    daemon.signal_scheduler()
     return 0
 
 
 def command_list(args: argparse.Namespace) -> int:
     """List the cards of the deck."""
+    if args.lang is not None and resolve_language(args.lang, args.lang) is None:
+        return 2
     paths.ensure_dirs()
-    deck = models.load_deck(paths.deck_path())
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, _ = loaded
     if not deck:
         print("The deck is empty. Add a card with 'linguapulse add'.")
         return 0
@@ -2996,19 +3868,26 @@ def command_list(args: argparse.Namespace) -> int:
 def command_seed(args: argparse.Namespace) -> int:
     """Add the bundled example cards to the deck."""
     paths.ensure_dirs()
-    deck = models.load_deck(paths.deck_path())
-    states = models.load_states(paths.state_path())
-    added = 0
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, _ = loaded
+    added: list[str] = []
     for card in seed_cards(args.limit):
         if card.id in deck:
             continue
         deck[card.id] = card
-        states.setdefault(card.id, srs.new_state(card.id, models.now_utc()))
-        added += 1
+        added.append(card.id)
     if added:
         models.save_deck(paths.deck_path(), deck)
-        models.save_states(paths.state_path(), states)
-    print(f"Added {added} seed card(s), the deck holds {len(deck)} card(s).")
+        with store.state_lock():
+            current = models.load_states(paths.state_path())
+            for card_id in added:
+                current.setdefault(card_id, srs.new_state(card_id, models.now_utc()))
+            models.save_states(paths.state_path(), current)
+    print(f"Added {len(added)} seed card(s), the deck holds {len(deck)} card(s).")
+    if added:
+        daemon.signal_scheduler()
     return 0
 
 
@@ -3016,12 +3895,18 @@ def command_config(args: argparse.Namespace) -> int:
     """Show or change the preferences."""
     paths.ensure_dirs()
     settings = config.load_config()
+    source = resolve_language(args.source_lang, settings.source_lang)
+    if source is None:
+        return 2
+    target = resolve_language(args.target_lang, settings.target_lang)
+    if target is None:
+        return 2
     changed = False
     if args.source_lang:
-        settings.source_lang = args.source_lang
+        settings.source_lang = source
         changed = True
     if args.target_lang:
-        settings.target_lang = args.target_lang
+        settings.target_lang = target
         changed = True
     if args.notify is not None:
         settings.notify_enabled = args.notify
@@ -3054,7 +3939,11 @@ Register the new commands in the dispatch table of `main`:
 
 Run: `python3 -m pytest tests/test_cli_deck.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 21 tests.
+
+Run: `python3 -m pytest`
+
+Expected: PASS, 174 tests, every test of every task.
 
 - [ ] **Step 5: Commit (only when the user explicitly requested commits)**
 
@@ -3075,7 +3964,7 @@ git commit -m "feat: add the deck commands to the cli"
 
 **Interfaces:**
 - Consumes: `models` from Task 4, `notify` from Task 7, `paths` from Task 3, `scheduler` from Task 8.
-- Produces: `daemon.DeliveryReport(delivered, skipped, notified, message)`, `daemon.FailureLog(every=10)` with `should_log(key) -> bool`, `daemon.acquire_lock(path=None)`, `daemon.write_pid(path=None)`, `daemon.read_pid(path=None) -> int | None`, `daemon.remove_pid(path=None)`, `daemon.scheduler_is_running(path=None) -> bool`, `daemon.signal_scheduler(path=None) -> bool`, `daemon.deliver_due(cards, states, moment, notifier=None) -> DeliveryReport`, `daemon.run(max_iterations=None, idle_timeout=None) -> int`.
+- Produces: `daemon.DeliveryReport(delivered, skipped, notified, message, handled)`, `daemon.FailureLog(every=10)` with `should_log(key) -> bool` and `recovered() -> bool`, `daemon.acquire_lock(path=None)`, `daemon.write_pid(path=None)`, `daemon.read_pid(path=None) -> int | None`, `daemon.remove_pid(path=None)`, `daemon.scheduler_is_running(path=None) -> bool`, `daemon.signal_scheduler(path=None) -> bool`, `daemon.deliver_due(cards, states, moment, notifier=None, notify_enabled=True) -> DeliveryReport`, `daemon.run(max_iterations=None, idle_timeout=None) -> int`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3087,10 +3976,11 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import linguapulse
-from linguapulse import daemon, models, notify
+from linguapulse import cli, config, daemon, models, notify, paths, srs
 
 PAST = "2020-01-01T09:00:00+00:00"
 DUE = "2026-10-21T08:55:00+00:00"
@@ -3177,7 +4067,9 @@ def test_the_lock_excludes_a_second_scheduler(home):
     assert handle is not None
     assert daemon.acquire_lock() is None
     handle.close()
-    assert daemon.acquire_lock() is not None
+    second = daemon.acquire_lock()
+    assert second is not None
+    second.close()
 
 
 def test_the_pid_file_is_written_and_removed(home):
@@ -3193,6 +4085,13 @@ def test_read_pid_ignores_a_broken_pid_file(home):
     assert daemon.read_pid() is None
 
 
+def test_read_pid_rejects_a_process_group_and_every_process(home):
+    pid_file = paths.pid_path()
+    for raw in ("0", "-1"):
+        pid_file.write_text(f"{raw}\n", encoding="utf-8")
+        assert daemon.read_pid() is None
+
+
 def test_signalling_without_a_scheduler_does_nothing(home):
     assert daemon.signal_scheduler() is False
 
@@ -3200,12 +4099,26 @@ def test_signalling_without_a_scheduler_does_nothing(home):
 def test_signalling_a_running_scheduler_sends_a_wake_up(home):
     received = []
     previous = signal.signal(signal.SIGHUP, lambda signum, frame: received.append(signum))
+    lock = daemon.acquire_lock()
     try:
         daemon.write_pid()
         assert daemon.signal_scheduler() is True
     finally:
         signal.signal(signal.SIGHUP, previous)
+        lock.close()
     assert received == [signal.SIGHUP]
+
+
+def test_a_stale_pid_file_without_the_lock_is_not_signalled(home):
+    received = []
+    previous = signal.signal(signal.SIGHUP, lambda signum, frame: received.append(signum))
+    try:
+        daemon.write_pid()
+        assert daemon.scheduler_is_running() is False
+        assert daemon.signal_scheduler() is False
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+    assert received == []
 
 
 def test_the_failure_log_reports_the_first_and_every_tenth_failure():
@@ -3217,8 +4130,141 @@ def test_the_failure_log_reports_the_first_and_every_tenth_failure():
     assert failures.should_log("boom") is True
 
 
+def test_the_failure_log_reports_the_recovery():
+    failures = daemon.FailureLog(every=10)
+    assert failures.recovered() is False
+    failures.should_log("boom")
+    assert failures.recovered() is True
+    assert failures.recovered() is False
+    assert failures.should_log("boom") is True
+
+
 def test_the_loop_stops_after_the_configured_number_of_iterations(home):
     assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
+
+
+def test_a_grade_saved_while_sending_survives_the_marks(home, moment, monkeypatch):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    graded = {}
+
+    def grade_while_sending(title, body):
+        states = models.load_states(paths.state_path())
+        graded["state"] = srs.apply_grade(states["hello"], "easy", moment)
+        models.save_states(paths.state_path(), {"hello": graded["state"]})
+        return notify.NotifyResult(True, 0, "")
+
+    monkeypatch.setattr(daemon.notify, "send", grade_while_sending)
+    assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
+    saved = models.load_states(paths.state_path())["hello"]
+    assert saved.reps == graded["state"].reps
+    assert saved.interval_days == graded["state"].interval_days
+    assert saved.ease == graded["state"].ease
+    assert saved.handled_due == due
+
+
+def test_a_cli_grade_saved_while_sending_survives_the_marks(home, monkeypatch):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    graded = {}
+
+    def grade_while_sending(title, body):
+        assert cli.main(["next", "good"]) == 0
+        graded["state"] = models.load_states(paths.state_path())["hello"]
+        return notify.NotifyResult(True, 0, "")
+
+    monkeypatch.setattr(daemon.notify, "send", grade_while_sending)
+    assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
+    saved = models.load_states(paths.state_path())["hello"]
+    assert saved.reps == graded["state"].reps == 1
+    assert saved.interval_days == graded["state"].interval_days
+    assert saved.ease == graded["state"].ease
+    assert saved.handled_due == due
+
+
+def test_due_reminders_are_marked_when_notifications_are_disabled(home, monkeypatch, capsys):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    config.save_config(config.Config(notify_enabled=False))
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send", lambda title, body: sent.append(title))
+    assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
+    assert sent == []
+    assert models.load_states(paths.state_path())["hello"].handled_due == due
+    captured = capsys.readouterr()
+    assert "notifications are disabled" in captured.err
+    assert "notification problem" not in captured.err
+
+
+def test_the_loop_sleeps_until_the_next_wakeup(home, monkeypatch):
+    fixed = datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(models, "now_utc", lambda: fixed)
+    due = models.iso(fixed + timedelta(hours=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    timeouts = []
+
+    def fake_select(read, write, error, timeout):
+        timeouts.append(timeout)
+        return ([], [], [])
+
+    monkeypatch.setattr(daemon.select, "select", fake_select)
+    assert daemon.run(max_iterations=1) == 0
+    assert timeouts == [3600.0]
+
+
+def test_a_notification_problem_and_the_recovery_are_logged(home, monkeypatch, capsys):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    calls = []
+
+    def flaky(title, body):
+        calls.append(title)
+        if len(calls) == 1:
+            models.save_deck(
+                paths.deck_path(), {"hello": make_card(), "world": make_card("world")}
+            )
+            models.save_states(
+                paths.state_path(),
+                {
+                    "hello": models.CardState(card_id="hello", due=due),
+                    "world": models.CardState(card_id="world", due=due),
+                },
+            )
+            return notify.NotifyResult(False, 1, "Could not connect")
+        return notify.NotifyResult(True, 0, "")
+
+    monkeypatch.setattr(daemon.notify, "send", flaky)
+    assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
+    assert len(calls) == 2
+    captured = capsys.readouterr()
+    assert "notification problem: Could not connect" in captured.err
+    assert "notifications are being delivered again" in captured.err
+
+
+def test_a_broken_deck_does_not_kill_the_scheduler(home, capsys):
+    paths.deck_path().write_text('{"version": 1, "cards": {', encoding="utf-8")
+    assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
+    captured = capsys.readouterr()
+    assert "error: " in captured.err
+    assert "is not valid JSON" in captured.err
+    assert daemon.read_pid() is None
+    lock = daemon.acquire_lock()
+    assert lock is not None
+    lock.close()
+
+
+def test_a_second_scheduler_reports_the_error(home, capsys):
+    lock = daemon.acquire_lock()
+    try:
+        assert daemon.run(max_iterations=1, idle_timeout=0.0) == 1
+    finally:
+        lock.close()
+    assert "error: another scheduler is already running" in capsys.readouterr().err
 
 
 def test_the_scheduler_stops_on_a_terminate_signal(home):
@@ -3263,7 +4309,7 @@ from datetime import datetime, timezone
 
 Run: `python3 -m pytest tests/test_daemon.py -v`
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'linguapulse.daemon'`.
+Expected: FAIL with `ImportError: cannot import name 'daemon' from 'linguapulse'`, the module does not exist yet.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -3286,7 +4332,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import models, notify, paths, scheduler
+from . import config, models, notify, paths, scheduler, store
 
 RESCAN_SECONDS = 3600.0
 
@@ -3299,6 +4345,7 @@ class DeliveryReport:
     skipped: tuple[scheduler.Occurrence, ...]
     notified: bool
     message: str
+    handled: tuple[tuple[str, str], ...] = ()
 
 
 class FailureLog:
@@ -3307,12 +4354,22 @@ class FailureLog:
     def __init__(self, every: int = 10) -> None:
         self.every = max(1, every)
         self.counts: dict[str, int] = {}
+        self.current = ""
 
     def should_log(self, key: str) -> bool:
         """Return True when the failure should be written to the log."""
+        self.current = key
         count = self.counts.get(key, 0) + 1
         self.counts[key] = count
         return count == 1 or count % self.every == 0
+
+    def recovered(self) -> bool:
+        """Forget the failure streak and return True when there was one."""
+        if not self.current:
+            return False
+        self.current = ""
+        self.counts.clear()
+        return True
 
 
 def acquire_lock(path: Path | None = None) -> io.TextIOWrapper | None:
@@ -3345,9 +4402,10 @@ def read_pid(path: Path | None = None) -> int | None:
     except OSError:
         return None
     try:
-        return int(raw)
+        pid = int(raw)
     except ValueError:
         return None
+    return pid if pid > 1 else None
 
 
 def remove_pid(path: Path | None = None) -> None:
@@ -3359,11 +4417,18 @@ def remove_pid(path: Path | None = None) -> None:
         pass
 
 
-def scheduler_is_running(path: Path | None = None) -> bool:
-    """Return True when a scheduler process is alive."""
-    pid = read_pid(path)
-    if pid is None:
+def _lock_is_free(path: Path | None = None) -> bool:
+    """Return True when no scheduler holds the lock, releasing it again."""
+    target = None if path is None else path.parent / "daemon.lock"
+    handle = acquire_lock(target)
+    if handle is None:
         return False
+    handle.close()
+    return True
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return True when a process with this id still exists."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -3373,10 +4438,20 @@ def scheduler_is_running(path: Path | None = None) -> bool:
     return True
 
 
+def scheduler_is_running(path: Path | None = None) -> bool:
+    """Return True when a scheduler holds the lock and its process is alive."""
+    if _lock_is_free(path):
+        return False
+    pid = read_pid(path)
+    return pid is not None and _pid_is_alive(pid)
+
+
 def signal_scheduler(path: Path | None = None) -> bool:
     """Ask a running scheduler to recompute its next wake up."""
+    if _lock_is_free(path):
+        return False
     pid = read_pid(path)
-    if pid is None:
+    if pid is None or not _pid_is_alive(pid):
         return False
     try:
         os.kill(pid, signal.SIGHUP)
@@ -3406,13 +4481,33 @@ def _notification_for(group: Sequence[scheduler.Occurrence]) -> tuple[str, str]:
 def _mark_handled(
     states: Mapping[str, models.CardState],
     occurrences: Sequence[scheduler.Occurrence],
-) -> None:
-    """Remember that these occurrences were acted on."""
+) -> tuple[tuple[str, str], ...]:
+    """Remember that these occurrences were acted on and return their marks."""
+    marks: list[tuple[str, str]] = []
     for occurrence in occurrences:
         state = occurrence.state
         if state is None:
             continue
-        state.handled_due = occurrence.due.isoformat()
+        mark = (occurrence.card.id, occurrence.due.isoformat())
+        marks.append(mark)
+        state.handled_due = mark[1]
+    return tuple(marks)
+
+
+def _save_marks(marks: Sequence[tuple[str, str]]) -> dict[str, models.CardState]:
+    """Apply the handled marks to the current state file and save it.
+
+    The states are read again right before the write, because a grade may
+    have been recorded while the notification was being sent. Only the marks
+    are applied, so the grade keeps its own due, interval and ease.
+    """
+    with store.state_lock():
+        states = models.load_states(paths.state_path())
+        for card_id, due_iso in marks:
+            state = states.setdefault(card_id, models.CardState(card_id=card_id, due=due_iso))
+            state.handled_due = due_iso
+        models.save_states(paths.state_path(), states)
+    return states
 
 
 def deliver_due(
@@ -3420,11 +4515,16 @@ def deliver_due(
     states: Mapping[str, models.CardState],
     moment: datetime,
     notifier: Callable[[str, str], notify.NotifyResult] | None = None,
+    notify_enabled: bool = True,
 ) -> DeliveryReport:
     """Deliver the reminder that is due and remember that it was handled.
 
     The message of the report is only set when something went wrong, so that
-    the caller can log it without writing a line for every empty round.
+    the caller can log it without writing a line for every empty round. The
+    handled marks are returned for the caller to persist, because the states
+    it read may be out of date by the time the notification was sent. When
+    notifications are disabled the due occurrences are marked as handled
+    without sending anything.
     """
     send = notifier or notify.send
     pending = scheduler.pending_occurrences(cards, states, moment)
@@ -3434,35 +4534,38 @@ def deliver_due(
     if reminder is None:
         return DeliveryReport((), (), False, "")
     if not reminder.group:
-        _mark_handled(states, reminder.skipped)
-        return DeliveryReport((), reminder.skipped, False, "")
+        marks = _mark_handled(states, reminder.skipped)
+        return DeliveryReport((), reminder.skipped, False, "", marks)
+    if not notify_enabled:
+        marks = _mark_handled(states, reminder.handled)
+        return DeliveryReport((), (), False, "", marks)
     title, body = _notification_for(reminder.group)
     result = send(title, body)
-    _mark_handled(states, reminder.handled)
+    marks = _mark_handled(states, reminder.handled)
     if result.ok:
-        return DeliveryReport(reminder.group, reminder.skipped, True, "")
+        return DeliveryReport(reminder.group, reminder.skipped, True, "", marks)
     return DeliveryReport(
         reminder.group,
         reminder.skipped,
         False,
         result.message or "the notification failed",
+        marks,
     )
 
 
 def run(max_iterations: int | None = None, idle_timeout: float | None = None) -> int:
     """Run the scheduler until it is stopped.
 
-    The scheduler sleeps until the exact moment the next card is due. At most
-    once per hour it rescans the files, that is the safety net for a deck
-    that was edited by hand. The optional idle timeout caps that sleep, it is
-    only used by the tests.
+    The scheduler sleeps until the exact moment the next card is due. When
+    nothing is scheduled it rescans the files once an hour, that is the
+    safety net for a deck that was edited by hand. The optional idle timeout
+    caps that sleep, it is only used by the tests.
     """
     paths.ensure_dirs()
     lock = acquire_lock()
     if lock is None:
-        print("another scheduler is already running", file=sys.stderr)
+        print("error: another scheduler is already running", file=sys.stderr)
         return 1
-    write_pid()
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
     failures = FailureLog()
@@ -3490,24 +4593,56 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
     }
     iterations = 0
     try:
+        write_pid()
+        disabled_notice = False
         while not stop_signals:
-            cards = models.load_deck(paths.deck_path())
-            states = models.load_states(paths.state_path())
-            moment = models.now_utc()
-            report = deliver_due(cards, states, moment)
-            if report.delivered or report.skipped:
-                models.save_states(paths.state_path(), states)
-            if report.delivered:
-                print(f"delivered {len(report.delivered)} reminder(s)", flush=True)
-            elif report.skipped:
-                print(f"skipped {len(report.skipped)} stale reminder(s)", flush=True)
-            if report.message and not report.notified:
-                if failures.should_log(report.message):
-                    print(f"notification problem: {report.message}", file=sys.stderr, flush=True)
-            next_at = scheduler.next_wakeup(cards, states, models.now_utc())
             timeout = RESCAN_SECONDS
-            if next_at is not None:
-                timeout = max(0.0, (next_at - models.now_utc()).total_seconds())
+            try:
+                settings = config.load_config()
+                cards = models.load_deck(paths.deck_path())
+                states = models.load_states(paths.state_path())
+                moment = models.now_utc()
+                report = deliver_due(
+                    cards,
+                    states,
+                    moment,
+                    notify_enabled=settings.notify_enabled,
+                )
+                if report.handled:
+                    states = _save_marks(report.handled)
+                if not settings.notify_enabled:
+                    if report.handled and not disabled_notice:
+                        print(
+                            "notifications are disabled, marking due reminders as handled",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        disabled_notice = True
+                else:
+                    disabled_notice = False
+                    if report.delivered:
+                        print(f"delivered {len(report.delivered)} reminder(s)", flush=True)
+                    elif report.skipped:
+                        print(f"skipped {len(report.skipped)} stale reminder(s)", flush=True)
+                    if report.message and not report.notified:
+                        if failures.should_log(report.message):
+                            print(
+                                f"notification problem: {report.message}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                    elif report.notified and failures.recovered():
+                        print(
+                            "notifications are being delivered again",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                next_at = scheduler.next_wakeup(cards, states, models.now_utc())
+                if next_at is not None:
+                    timeout = max(0.0, (next_at - models.now_utc()).total_seconds())
+            except (ValueError, TypeError, OSError) as error:
+                if failures.should_log(f"round failed: {error}"):
+                    print(f"error: {error}", file=sys.stderr, flush=True)
             if idle_timeout is not None:
                 timeout = idle_timeout
             select.select([read_fd], [], [], timeout)
@@ -3532,7 +4667,7 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
 
 Run: `python3 -m pytest tests/test_daemon.py -v`
 
-Expected: PASS, 13 tests.
+Expected: PASS, 24 tests.
 
 - [ ] **Step 5: Wire the CLI to the scheduler**
 
@@ -3580,7 +4715,7 @@ def command_daemon(args: argparse.Namespace) -> int:
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test of every task.
+Expected: PASS, 198 tests, every test of every task.
 
 - [ ] **Step 8: Commit (only when the user explicitly requested commits)**
 
@@ -3599,15 +4734,34 @@ git commit -m "feat: add the background scheduler that wakes up when a card is d
 - Create: `tests/test_diagnostics.py`
 
 **Interfaces:**
-- Consumes: `daemon` from Task 12, `models` from Task 4, `notify` from Task 7, `paths` from Task 3.
-- Produces: `diagnostics.Check(name, ok, detail)`, `diagnostics.check_paths()`, `diagnostics.check_deck()`, `diagnostics.check_notify_send()`, `diagnostics.check_session_bus()`, `diagnostics.check_notification_daemon()`, `diagnostics.check_scheduler()`, `diagnostics.run_checks() -> list[Check]`, `cli.command_doctor(args)`.
+- Consumes: `config` from Task 6, `daemon` from Task 12, `models` from Task 4, `notify` from Task 7, `paths` from Task 3, `scheduler` from Task 8.
+- Produces: `diagnostics.Check(name, ok, detail)`, `diagnostics.check_paths()`, `diagnostics.check_config()`, `diagnostics.check_deck()`, `diagnostics.check_state()`, `diagnostics.check_notify_send()`, `diagnostics.check_busctl()`, `diagnostics.check_session_bus()`, `diagnostics.check_notification_daemon()`, `diagnostics.check_scheduler()`, `diagnostics.check_schedule()`, `diagnostics.run_checks() -> list[Check]`, `diagnostics.NOTIFICATION_HELP`, `cli.command_doctor(args)`.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_diagnostics.py`:
 
 ```python
-from linguapulse import daemon, diagnostics, notify, paths, store
+import os
+
+import pytest
+
+from linguapulse import __version__, cli, config, daemon, diagnostics, notify, paths, store
+
+PAST = "2020-01-01T09:00:00+00:00"
+FUTURE = "2099-01-01T09:00:00+00:00"
+
+
+def isolate_notifications(monkeypatch):
+    """Keep a check that runs everything away from the notification bus."""
+    monkeypatch.setattr(notify, "notify_send_path", lambda env=None: "/usr/bin/notify-send")
+    monkeypatch.setattr(
+        notify, "session_bus_address", lambda env=None: "unix:path=/run/user/1000/bus"
+    )
+    monkeypatch.setattr(notify, "notification_daemon", lambda env=None: "dunst")
+    monkeypatch.setattr(
+        diagnostics.shutil, "which", lambda name, path=None: "/usr/bin/busctl"
+    )
 
 
 def test_a_check_reports_its_name_and_detail():
@@ -3664,9 +4818,13 @@ def test_the_notification_daemon_check_reports_a_running_daemon(monkeypatch):
 
 
 def test_the_scheduler_check_reports_a_running_scheduler(home):
-    daemon.write_pid()
-    check = diagnostics.check_scheduler()
-    assert check.ok is True
+    lock = daemon.acquire_lock()
+    try:
+        daemon.write_pid()
+        check = diagnostics.check_scheduler()
+        assert check.ok is True
+    finally:
+        lock.close()
 
 
 def test_the_scheduler_check_reports_a_missing_scheduler(home):
@@ -3674,17 +4832,251 @@ def test_the_scheduler_check_reports_a_missing_scheduler(home):
     assert check.ok is False
 
 
-def test_every_check_has_a_name_and_a_detail(home):
+def test_every_check_has_a_name_and_a_detail(home, monkeypatch):
+    isolate_notifications(monkeypatch)
     for check in diagnostics.run_checks():
         assert check.name
         assert check.detail
+
+
+def test_run_checks_covers_the_installation(home, monkeypatch):
+    isolate_notifications(monkeypatch)
+    names = [check.name for check in diagnostics.run_checks()]
+    assert names == [
+        "paths",
+        "config",
+        "deck",
+        "state",
+        "notify-send",
+        "busctl",
+        "session bus",
+        "notification daemon",
+        "scheduler",
+        "schedule",
+    ]
+
+
+def test_the_paths_check_reports_an_unwritable_directory(home, monkeypatch):
+    def fail():
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(paths, "ensure_dirs", fail)
+    check = diagnostics.check_paths()
+    assert check.ok is False
+    assert "permission denied" in check.detail
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory permissions")
+def test_the_paths_check_reports_a_read_only_directory(home):
+    directory = paths.data_dir()
+    directory.chmod(0o555)
+    try:
+        check = diagnostics.check_paths()
+    finally:
+        directory.chmod(0o755)
+    assert check.ok is False
+    assert str(directory) in check.detail
+    assert "not writable" in check.detail
+
+
+def test_the_deck_check_reports_a_file_that_is_not_json(home):
+    paths.deck_path().write_text("{", encoding="utf-8")
+    check = diagnostics.check_deck()
+    assert check.ok is False
+    assert "cannot be read" in check.detail
+
+
+def test_the_state_check_reports_an_empty_state(home):
+    check = diagnostics.check_state()
+    assert check.ok is True
+    assert "0 states" in check.detail
+
+
+def test_the_state_check_reports_the_scheduled_cards(home):
+    store.write_json(
+        paths.state_path(),
+        {"cards": {"hello": {"card_id": "hello", "due": FUTURE}}},
+    )
+    check = diagnostics.check_state()
+    assert check.ok is True
+    assert "1 state" in check.detail
+
+
+def test_the_state_check_fails_on_a_broken_state_file(home):
+    paths.state_path().write_text("{", encoding="utf-8")
+    check = diagnostics.check_state()
+    assert check.ok is False
+    assert "cannot be read" in check.detail
+
+
+def test_the_busctl_check_reports_a_missing_binary(monkeypatch):
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda name, path=None: None)
+    check = diagnostics.check_busctl()
+    assert check.ok is False
+    assert "busctl" in check.detail
+
+
+def test_the_busctl_check_reports_an_installed_binary(monkeypatch):
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda name, path=None: "/usr/bin/busctl")
+    check = diagnostics.check_busctl()
+    assert check.ok is True
+    assert "/usr/bin/busctl" in check.detail
+
+
+def test_the_notification_daemon_check_reports_an_unowned_bus_name(monkeypatch):
+    monkeypatch.setattr(notify, "notification_daemon", lambda env=None: "-")
+    check = diagnostics.check_notification_daemon()
+    assert check.ok is False
+    assert "no daemon" in check.detail
+
+
+def test_the_config_check_reports_the_defaults(home):
+    check = diagnostics.check_config()
+    assert check.ok is True
+    assert "defaults" in check.detail
+    assert "source en" in check.detail
+    assert "target ar" in check.detail
+
+
+def test_the_config_check_reports_the_effective_file(home):
+    config.save_config(config.Config(source_lang="fr", target_lang="zh", notify_enabled=False))
+    check = diagnostics.check_config()
+    assert check.ok is True
+    assert "source fr" in check.detail
+    assert "target zh" in check.detail
+    assert "notifications disabled" in check.detail
+
+
+def test_the_config_check_surfaces_a_rejected_file(home):
+    paths.config_path().write_text("{", encoding="utf-8")
+    check = diagnostics.check_config()
+    assert check.ok is False
+    assert "not valid JSON" in check.detail
+    assert "defaults" in check.detail
+
+
+def test_the_config_check_surfaces_a_rejected_value(home):
+    store.write_json(paths.config_path(), {"source_lang": "de", "target_lang": "ar"})
+    check = diagnostics.check_config()
+    assert check.ok is False
+    assert "source_lang 'de'" in check.detail
+    assert "source en" in check.detail
+
+
+def test_the_scheduler_check_reports_a_dead_process(home, monkeypatch):
+    daemon.write_pid()
+    monkeypatch.setattr(daemon, "scheduler_is_running", lambda path=None: False)
+    check = diagnostics.check_scheduler()
+    assert check.ok is False
+    assert "not running" in check.detail
+
+
+def test_the_schedule_check_reports_nothing_scheduled(home):
+    check = diagnostics.check_schedule()
+    assert check.ok is True
+    assert "nothing is scheduled" in check.detail
+
+
+def test_the_schedule_check_reports_the_next_wakeup(home):
+    store.write_json(
+        paths.deck_path(),
+        {
+            "cards": {
+                "hello": {
+                    "id": "hello",
+                    "term": "hello",
+                    "source_lang": "en",
+                    "translations": {"ar": "مرحبا"},
+                    "created_at": PAST,
+                }
+            }
+        },
+    )
+    store.write_json(
+        paths.state_path(),
+        {"cards": {"hello": {"card_id": "hello", "due": FUTURE}}},
+    )
+    check = diagnostics.check_schedule()
+    assert check.ok is True
+    assert "next wakeup" in check.detail
+    assert "2099" in check.detail
+
+
+def test_the_schedule_check_reports_a_due_card(home):
+    store.write_json(
+        paths.deck_path(),
+        {
+            "cards": {
+                "hello": {
+                    "id": "hello",
+                    "term": "hello",
+                    "source_lang": "en",
+                    "translations": {"ar": "مرحبا"},
+                    "created_at": PAST,
+                }
+            }
+        },
+    )
+    store.write_json(
+        paths.state_path(),
+        {"cards": {"hello": {"card_id": "hello", "due": PAST}}},
+    )
+    check = diagnostics.check_schedule()
+    assert check.ok is True
+    assert "due now" in check.detail
+
+
+def test_the_doctor_prints_the_version_and_the_checks(monkeypatch, capsys):
+    monkeypatch.setattr(
+        diagnostics, "run_checks", lambda: [diagnostics.Check("deck", True, "3 cards")]
+    )
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert f"lingua-pulse {__version__}" in out
+    assert "[ok] deck: 3 cards" in out
+
+
+def test_the_doctor_exits_with_one_when_a_check_fails(monkeypatch, capsys):
+    monkeypatch.setattr(
+        diagnostics,
+        "run_checks",
+        lambda: [diagnostics.Check("scheduler", False, "not running")],
+    )
+    assert cli.main(["doctor"]) == 1
+    assert "[FAIL] scheduler: not running" in capsys.readouterr().out
+
+
+def test_the_doctor_explains_how_to_diagnose_a_notification_failure(monkeypatch, capsys):
+    monkeypatch.setattr(diagnostics, "run_checks", lambda: [])
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "notify-send" in out
+    assert "busctl" in out
+    assert "DBUS_SESSION_BUS_ADDRESS" in out
+
+
+def test_status_reports_the_notifications_and_the_scheduler(home, capsys, monkeypatch):
+    monkeypatch.setattr(daemon, "scheduler_is_running", lambda path=None: False)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Notify:     enabled" in out
+    assert "Scheduler: not running" in out
+
+
+def test_status_reports_disabled_notifications_and_a_running_scheduler(home, capsys, monkeypatch):
+    config.save_config(config.Config(notify_enabled=False))
+    monkeypatch.setattr(daemon, "scheduler_is_running", lambda path=None: True)
+    assert cli.main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "Notify:     disabled" in out
+    assert "Scheduler: running" in out
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m pytest tests/test_diagnostics.py -v`
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'linguapulse.diagnostics'`.
+Expected: FAIL with `ImportError: cannot import name 'diagnostics' from 'linguapulse'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -3696,10 +5088,18 @@ Create `src/linguapulse/diagnostics.py`:
 from __future__ import annotations
 
 import os
-import sys
+import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
-from . import daemon, models, notify, paths, store
+from . import config, daemon, models, notify, paths, scheduler, store
+
+NOTIFICATION_HELP = (
+    "run 'notify-send --app-name=linguapulse test hello' to test the notification itself",
+    "run 'busctl --user --no-pager list | grep org.freedesktop.Notifications' to find the daemon",
+    "in a systemd user service, make sure DBUS_SESSION_BUS_ADDRESS reaches the scheduler",
+)
 
 
 @dataclass(frozen=True)
@@ -3711,19 +5111,109 @@ class Check:
     detail: str
 
 
+def _counted(count: int, singular: str) -> str:
+    """Return a count with a correctly inflected noun."""
+    if count == 1:
+        return f"{count} {singular}"
+    return f"{count} {singular}s"
+
+
+def _probe_writable(directory: Path) -> None:
+    """Write and remove a probe file to prove that the directory is writable."""
+    descriptor, name = tempfile.mkstemp(
+        dir=directory, prefix=".linguapulse-probe-", suffix=".tmp"
+    )
+    try:
+        os.write(descriptor, b"probe\n")
+    finally:
+        os.close(descriptor)
+        Path(name).unlink(missing_ok=True)
+
+
 def check_paths() -> Check:
     """Check that the data directories exist and are writable."""
     try:
         paths.ensure_dirs()
     except OSError as exc:
         return Check("paths", False, f"the data directory is not writable: {exc}")
-    return Check("paths", True, str(paths.data_dir()))
+    directories = (paths.data_dir(), paths.config_dir(), paths.state_dir())
+    for directory in directories:
+        try:
+            _probe_writable(directory)
+        except OSError as exc:
+            return Check("paths", False, f"{directory} is not writable: {exc}")
+    return Check(
+        "paths",
+        True,
+        f"data {directories[0]}, config {directories[1]}, state {directories[2]}",
+    )
+
+
+def _config_summary(settings: config.Config) -> str:
+    """Describe the configuration that is in effect."""
+    notifications = "enabled" if settings.notify_enabled else "disabled"
+    return (
+        f"source {settings.source_lang}, target {settings.target_lang}, "
+        f"notifications {notifications}"
+    )
+
+
+def _rejected_config_fields(raw: dict[str, object], settings: config.Config) -> list[str]:
+    """Return the fields of the file that the loader replaced with a default."""
+    rejected: list[str] = []
+    for field_name, attribute in (
+        ("source_lang", settings.source_lang),
+        ("target_lang", settings.target_lang),
+    ):
+        if field_name not in raw:
+            continue
+        value = raw[field_name]
+        if not isinstance(value, str) or value.strip() != attribute:
+            rejected.append(f"{field_name} {value!r}")
+    if "notify_enabled" in raw:
+        value = raw["notify_enabled"]
+        if not isinstance(value, bool) or value != settings.notify_enabled:
+            rejected.append(f"notify_enabled {value!r}")
+    return rejected
+
+
+def check_config() -> Check:
+    """Check which configuration is in effect and whether the file was accepted."""
+    defaults = _config_summary(config.Config())
+    try:
+        raw = store.read_json(paths.config_path(), None)
+    except (OSError, ValueError) as exc:
+        return Check(
+            "config",
+            False,
+            f"the configuration file cannot be read: {exc}; the defaults are in effect: {defaults}",
+        )
+    if raw is None:
+        return Check("config", True, f"the defaults are in effect: {defaults}")
+    if not isinstance(raw, dict):
+        return Check(
+            "config",
+            False,
+            f"the configuration file is not a JSON object; the defaults are in effect: {defaults}",
+        )
+    settings = config.Config.from_dict(raw)
+    rejected = _rejected_config_fields(raw, settings)
+    if rejected:
+        return Check(
+            "config",
+            False,
+            f"{', '.join(rejected)} rejected; in effect: {_config_summary(settings)}",
+        )
+    return Check("config", True, f"in effect: {_config_summary(settings)}")
 
 
 def check_deck() -> Check:
     """Check that the deck file can be read and has no problems."""
     path = paths.deck_path()
-    raw = store.read_json(path, None)
+    try:
+        raw = store.read_json(path, None)
+    except (OSError, ValueError) as exc:
+        return Check("deck", False, f"the deck file cannot be read: {exc}")
     if raw is None:
         return Check("deck", True, "0 cards, no deck file yet")
     problems = models.validate_deck_raw(raw)
@@ -3733,12 +5223,32 @@ def check_deck() -> Check:
     return Check("deck", True, f"{count} cards, no problems")
 
 
+def check_state() -> Check:
+    """Check that the state file can be read and holds a schedule."""
+    path = paths.state_path()
+    try:
+        states = models.load_states(path)
+    except (OSError, TypeError, ValueError) as exc:
+        return Check("state", False, f"the state file cannot be read: {exc}")
+    if not path.exists():
+        return Check("state", True, "0 states, no state file yet")
+    return Check("state", True, f"{_counted(len(states), 'state')}, no problems")
+
+
 def check_notify_send() -> Check:
     """Check that notify-send is installed."""
     binary = notify.notify_send_path()
     if binary is None:
         return Check("notify-send", False, "notify-send was not found in PATH")
     return Check("notify-send", True, binary)
+
+
+def check_busctl() -> Check:
+    """Check that busctl is installed, so that the daemon can be identified."""
+    binary = shutil.which(notify.BUSCTL, path=os.environ.get("PATH") or "")
+    if binary is None:
+        return Check("busctl", False, "busctl was not found in PATH")
+    return Check("busctl", True, binary)
 
 
 def check_session_bus() -> Check:
@@ -3756,7 +5266,7 @@ def check_session_bus() -> Check:
 def check_notification_daemon() -> Check:
     """Check that a notification daemon owns the notifications bus name."""
     daemon_name = notify.notification_daemon()
-    if daemon_name is None:
+    if daemon_name is None or daemon_name == "-":
         return Check(
             "notification daemon",
             False,
@@ -3771,19 +5281,40 @@ def check_scheduler() -> Check:
     if pid is None:
         return Check("scheduler", False, "the scheduler is not running")
     if not daemon.scheduler_is_running():
-        return Check("scheduler", False, f"the scheduler process {pid} is gone")
+        return Check("scheduler", False, f"the scheduler is not running (process {pid} is gone)")
     return Check("scheduler", True, f"running with process {pid}")
+
+
+def check_schedule() -> Check:
+    """Check when the scheduler will wake up next."""
+    try:
+        cards = models.load_deck(paths.deck_path())
+        states = models.load_states(paths.state_path())
+    except (OSError, TypeError, ValueError) as exc:
+        return Check("schedule", False, f"the deck or state file cannot be read: {exc}")
+    moment = models.now_utc()
+    pending = scheduler.pending_occurrences(cards, states, moment)
+    if pending:
+        return Check("schedule", True, f"{_counted(len(pending), 'card')} due now")
+    upcoming = scheduler.next_wakeup(cards, states, moment)
+    if upcoming is None:
+        return Check("schedule", True, "nothing is scheduled")
+    return Check("schedule", True, f"next wakeup at {upcoming.isoformat()}")
 
 
 def run_checks() -> list[Check]:
     """Run every diagnostic check."""
     return [
         check_paths(),
+        check_config(),
         check_deck(),
+        check_state(),
         check_notify_send(),
+        check_busctl(),
         check_session_bus(),
         check_notification_daemon(),
         check_scheduler(),
+        check_schedule(),
     ]
 ```
 
@@ -3791,7 +5322,7 @@ def run_checks() -> list[Check]:
 
 Run: `python3 -m pytest tests/test_diagnostics.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 34 tests.
 
 - [ ] **Step 5: Add the doctor command**
 
@@ -3812,12 +5343,18 @@ Add the command implementation:
 ```python
 def command_doctor(args: argparse.Namespace) -> int:
     """Run every diagnostic check and report the result."""
+    print(f"lingua-pulse {__version__}")
+    print()
     failed = 0
     for check in diagnostics.run_checks():
         mark = "ok" if check.ok else "FAIL"
         print(f"[{mark}] {check.name}: {check.detail}")
         if not check.ok:
             failed += 1
+    print()
+    print("To diagnose a notification failure:")
+    for line in diagnostics.NOTIFICATION_HELP:
+        print(f"  {line}")
     return 1 if failed else 0
 ```
 
@@ -3840,7 +5377,7 @@ In `command_status` of `src/linguapulse/cli.py`, add these lines before the fina
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test.
+Expected: PASS, 232 tests, every test of every task.
 
 - [ ] **Step 8: Commit (only when the user explicitly requested commits)**
 
@@ -3868,7 +5405,11 @@ git commit -m "feat: add diagnostics and the doctor command"
 Create `tests/test_service.py`:
 
 ```python
-from linguapulse import service
+import subprocess
+
+import pytest
+
+from linguapulse import cli, service
 
 
 def test_render_unit_contains_the_exec_start():
@@ -3950,13 +5491,87 @@ def test_remove_autostart_without_a_block_does_nothing(home, tmp_path, monkeypat
     monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
     assert service.remove_autostart() is False
     assert target.read_text(encoding="utf-8") == "# my own settings\n"
+
+
+def test_uninstall_stops_the_running_service(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    calls = []
+
+    def fake_systemctl(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(["systemctl", "--user", *args], 0, "", "")
+
+    monkeypatch.setattr(service, "systemctl", fake_systemctl)
+    steps = service.uninstall()
+    assert ("stop", service.UNIT_NAME) in calls
+    assert ("disable", service.UNIT_NAME) in calls
+    assert calls.index(("stop", service.UNIT_NAME)) < calls.index(("disable", service.UNIT_NAME))
+    assert f"stopped {service.UNIT_NAME}" in steps
+
+
+def test_install_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# >>> lingua-pulse >>>\nMod4-Shift-q = close\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert cli.main(["install", "--executable", "/usr/local/bin/linguapulse"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert str(target) in captured.err
+    assert "malformed" in captured.err
+    assert "left untouched" in captured.err
+    assert target.read_text(encoding="utf-8") == original
+    assert not service.unit_path().exists()
+
+
+def test_uninstall_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "autostart"
+    original = (
+        "# my own settings\n# >>> lingua-pulse >>>\n"
+        "Mod4-Shift-q = close\nMod4-Return = spawn xterm\n"
+    )
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert cli.main(["uninstall"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert str(target) in captured.err
+    assert "malformed" in captured.err
+    assert "left untouched" in captured.err
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_install_autostart_refuses_an_orphan_end_marker(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# <<< lingua-pulse <<<\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    with pytest.raises(service.MalformedBlock):
+        service.install_autostart()
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_remove_autostart_refuses_an_orphan_end_marker(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    original = "# my own settings\n# <<< lingua-pulse <<<\n"
+    target.write_text(original, encoding="utf-8")
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    with pytest.raises(service.MalformedBlock):
+        service.remove_autostart()
+    assert target.read_text(encoding="utf-8") == original
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `python3 -m pytest tests/test_service.py -v`
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'linguapulse.service'`.
+Expected: FAIL with `ImportError: cannot import name 'service' from 'linguapulse'`.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -3998,6 +5613,10 @@ AUTOSTART_BLOCK = f"""{AUTOSTART_BEGIN}
 systemctl --user start {UNIT_NAME}
 {AUTOSTART_END}
 """
+
+
+class MalformedBlock(ValueError):
+    """Raised when only one of the two autostart markers is present."""
 
 
 def unit_dir() -> Path:
@@ -4058,13 +5677,35 @@ def autostart_block() -> str:
     return AUTOSTART_BLOCK
 
 
-def install_autostart() -> bool:
-    """Add the marked block to the herbstluftwm autostart file."""
+def check_autostart() -> None:
+    """Raise MalformedBlock when only one of the two markers is present.
+
+    A file with no marker, or with both markers, is left to the caller. A file
+    with one marker but not the other is a hand edit or an interrupted write,
+    and neither installing nor removing can tell where the block begins and
+    ends, so the file is never touched.
+    """
     path = autostart_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    if (AUTOSTART_BEGIN in content) != (AUTOSTART_END in content):
+        raise MalformedBlock(
+            f"{path}: the marked block is malformed, only one of its markers is present, "
+            "the file was left untouched",
+        )
+
+
+def install_autostart() -> bool:
+    """Add the marked block to the herbstluftwm autostart file.
+
+    MalformedBlock is raised, and the file left untouched, when only one of the
+    two markers is present.
+    """
+    check_autostart()
+    path = autostart_path()
     original = path.read_text(encoding="utf-8") if path.exists() else ""
     if AUTOSTART_BEGIN in original and AUTOSTART_END in original:
         return False
+    path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         shutil.copy2(path, path.with_name(path.stem + ".linguapulse.bak"))
     if original and not original.endswith("\n"):
@@ -4076,10 +5717,15 @@ def install_autostart() -> bool:
 
 
 def remove_autostart() -> bool:
-    """Remove the marked block from the herbstluftwm autostart file."""
+    """Remove the marked block from the herbstluftwm autostart file.
+
+    MalformedBlock is raised, and the file left untouched, when only one of the
+    two markers is present.
+    """
     path = autostart_path()
     if not path.exists():
         return False
+    check_autostart()
     original = path.read_text(encoding="utf-8")
     if AUTOSTART_BEGIN not in original:
         return False
@@ -4119,8 +5765,18 @@ def disable() -> bool:
     return systemctl("disable", UNIT_NAME).returncode == 0
 
 
+def stop() -> bool:
+    """Stop the running user unit, if it is running."""
+    return systemctl("stop", UNIT_NAME).returncode == 0
+
+
 def install(executable: str) -> list[str]:
-    """Install the unit and the autostart, and report every step."""
+    """Install the unit and the autostart, and report every step.
+
+    MalformedBlock is raised, and nothing is written, when only one of the two
+    autostart markers is present.
+    """
+    check_autostart()
     steps: list[str] = []
     unit = install_unit(executable)
     steps.append(f"wrote the user unit {unit}")
@@ -4137,8 +5793,15 @@ def install(executable: str) -> list[str]:
 
 
 def uninstall() -> list[str]:
-    """Remove the unit and the autostart, and report every step."""
+    """Remove the unit and the autostart, and report every step.
+
+    MalformedBlock is raised, and nothing is removed, when only one of the two
+    autostart markers is present.
+    """
+    check_autostart()
     steps: list[str] = []
+    if stop():
+        steps.append(f"stopped {UNIT_NAME}")
     if disable():
         steps.append(f"disabled {UNIT_NAME}")
     if remove_unit():
@@ -4157,7 +5820,7 @@ def uninstall() -> list[str]:
 
 Run: `python3 -m pytest tests/test_service.py -v`
 
-Expected: PASS, 11 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Add the install and uninstall commands**
 
@@ -4182,7 +5845,12 @@ Add the command implementations:
 def command_install(args: argparse.Namespace) -> int:
     """Install the systemd user unit and the herbstluftwm autostart."""
     executable = args.executable or service.default_executable()
-    for step in service.install(executable):
+    try:
+        steps = service.install(executable)
+    except service.MalformedBlock as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    for step in steps:
         print(step)
     print("Log out and back in, or run: systemctl --user start linguapulse.service")
     return 0
@@ -4190,9 +5858,15 @@ def command_install(args: argparse.Namespace) -> int:
 
 def command_uninstall(args: argparse.Namespace) -> int:
     """Remove the systemd user unit and the herbstluftwm autostart."""
-    for step in service.uninstall():
+    try:
+        steps = service.uninstall()
+    except service.MalformedBlock as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    for step in steps:
         print(step)
     return 0
+
 ```
 
 Add the dispatch entries:
@@ -4206,13 +5880,13 @@ Add the dispatch entries:
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test.
+Expected: PASS, 247 tests, every test of every task.
 
 - [ ] **Step 7: Commit (only when the user explicitly requested commits)**
 
 ```bash
-git add src/linguapulse/service.py src/linguapulse/cli.py tests/test_service.py
-git commit -m "feat: install the systemd user unit and the herbstluftwm autostart"
+git add src/linguapulse/cli.py src/linguapulse/service.py tests/test_service.py
+git commit -m "feat: add the service installation and the autostart"
 ```
 
 ---
@@ -4220,7 +5894,7 @@ git commit -m "feat: install the systemd user unit and the herbstluftwm autostar
 ### Task 15: The Readme and the End to End Check
 
 **Files:**
-- Create: `README.md`
+- Modify: `README.md`
 
 **Interfaces:**
 - Consumes: the whole package.
@@ -4228,7 +5902,7 @@ git commit -m "feat: install the systemd user unit and the herbstluftwm autostar
 
 - [ ] **Step 1: Write the README**
 
-Create `README.md`:
+Replace `README.md`:
 
 ```markdown
 # lingua-pulse
@@ -4239,7 +5913,7 @@ reminds you once, exactly when the word is due.
 
 * No GUI, no tray icon, no web server, no background database.
 * Standard library only, Python 3.11 or newer.
-* One notification per due word, never a pile of leftovers.
+* One notification per due moment, never a pile of leftovers.
 
 ## Install
 
@@ -4250,7 +5924,7 @@ pipx install .
 Or run it straight from the checkout:
 
 ```bash
-python3 -m linguapulse --version
+PYTHONPATH=src python3 -m linguapulse --version
 ```
 
 ## Quick start
@@ -4262,6 +5936,9 @@ linguapulse next good               # grade it
 linguapulse status                  # what is due and when
 linguapulse doctor                  # check that everything works
 ```
+
+`doctor` exits with 1 until the service is installed, so the `[FAIL] scheduler`
+line is expected before `linguapulse install`.
 
 ## Commands
 
@@ -4289,8 +5966,9 @@ occurrence was handled and computes the next wake up.
 
 * Grading a card wakes the scheduler up right away, so the next card is
   scheduled without a delay.
-* At most once per hour the scheduler rescans the files, that is the safety
-  net for a deck that was edited by hand.
+* When nothing is scheduled, the scheduler rechecks the files at most once per
+  hour. A deck that was edited by hand is picked up at that rescan, or when the
+  scheduler next wakes for an already scheduled card.
 * A reminder that is more than 15 minutes late is skipped, not replayed.
 * Older reminders of a backlog are dropped, only the newest one is delivered.
 * A word that you grade with `again` comes back after 10 minutes, without a
@@ -4298,10 +5976,20 @@ occurrence was handled and computes the next wake up.
 
 ## How the notifications behave
 
-* One notification per due card, no retries.
-* When the notification cannot be delivered, the problem is written to the log
-  of the service and the reason is actionable.
-* Identical failures are logged once and then only every tenth time.
+* One notification per due moment, no retries.
+* When the notification cannot be delivered, the problem is written to the
+  service log (`journalctl --user -u linguapulse.service`) and the reason is
+  actionable.
+
+  If no notification appears, run `linguapulse doctor`: it prints the steps that
+  diagnose the failure: a direct `notify-send` test, a `busctl` lookup of the
+  notification daemon and the check that `DBUS_SESSION_BUS_ADDRESS` reaches the
+  scheduler.
+* Identical failures are logged once and then only every tenth time, and the
+  log reports when delivery recovers (`notifications are being delivered
+  again`).
+* `linguapulse config --no-notify` silences the desktop notifications while
+  cards still come due and are marked handled.
 
 ## Files
 
@@ -4314,8 +6002,19 @@ occurrence was handled and computes the next wake up.
 | `~/.local/state/linguapulse/daemon.lock` | The lock that keeps one scheduler. |
 | `~/.local/state/linguapulse/daemon.pid` | The process id of the scheduler. |
 
-Set `LINGUAPULSE_HOME` to move every file into one directory, which is handy
-for tests.
+Set `LINGUAPULSE_HOME` to move the data, config and state directories under
+one root, which is handy for tests.
+
+## Terminal and fonts
+
+* A UTF-8 locale is required, for example `LANG=en_US.UTF-8`; the Arabic and
+  Chinese terms cannot be shown otherwise.
+* Use a monospace font that covers Arabic and Simplified Chinese. Check the
+  installed fonts with `fc-list :lang=ar` and `fc-list :lang=zh`.
+* Chinese cards carry pinyin with tone marks, the font has to cover them too.
+* Local scheduling needs the time zone database (`tzdata`). Without it the
+  scheduler falls back to UTC.
+* The supported language codes are `ar`, `en`, `es`, `fr`, `tr` and `zh`.
 
 ## Installation of the service
 
@@ -4327,26 +6026,32 @@ systemctl --user start linguapulse.service
 `install` writes `~/.config/systemd/user/linguapulse.service`, enables it and
 adds a marked block to `~/.config/herbstluftwm/autostart`. Your own autostart
 file is never overwritten and a backup is written to
-`autostart.linguapulse.bak`.
+`autostart.linguapulse.bak`. Undo it with `linguapulse uninstall`, which stops
+the running service, disables the unit, and removes the unit and the marked
+block again.
 
 ## Development
 
+The tests need pytest, which the `dev` extra provides:
+
 ```bash
+pip install -e '.[dev]'
 python3 -m pytest -v
 ```
 
-The tests run from the checkout, no installation is needed.
+The tests run from the checkout against `src/`, no other installation is
+needed.
 ```
 
 - [ ] **Step 2: Run the whole test suite**
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, every test of every task.
+Expected: PASS, 247 tests, every test of every task.
 
 - [ ] **Step 3: Check the manual pages of the CLI**
 
-Run: `python3 -m linguapulse --help` and `python3 -m linguapulse next --help`
+Run: `PYTHONPATH=src python3 -m linguapulse --help` and `PYTHONPATH=src python3 -m linguapulse next --help`
 
 Expected: the help text lists every command and every option.
 
@@ -4354,44 +6059,40 @@ Expected: the help text lists every command and every option.
 
 ```bash
 export LINGUAPULSE_HOME="$(mktemp -d)"
-python3 -m linguapulse seed
-python3 -m linguapulse list
-python3 -m linguapulse show --reveal
-python3 -m linguapulse next good
-python3 -m linguapulse history
-python3 -m linguapulse status
-python3 -m linguapulse validate
-python3 -m linguapulse doctor
+PYTHONPATH=src python3 -m linguapulse seed
+PYTHONPATH=src python3 -m linguapulse list
+PYTHONPATH=src python3 -m linguapulse show --reveal
+PYTHONPATH=src python3 -m linguapulse next good
+PYTHONPATH=src python3 -m linguapulse history
+PYTHONPATH=src python3 -m linguapulse status
+PYTHONPATH=src python3 -m linguapulse validate
+PYTHONPATH=src python3 -m linguapulse doctor
 ```
 
 Expected: the seed adds the bundled cards, `show` prints the due card, `next
 good` grades it and reports the next review, `history` lists the review,
-`status` shows one due card, `validate` reports no problems and `doctor`
-reports the state of the installation. The doctor exits with 1 when a check
-fails, which is the case while the scheduler is not running yet.
+`status` lists the remaining due cards (nine of the ten seeded, after one
+grading), `validate` reports no problems and `doctor` reports the state of the
+installation. The doctor exits with 1 when a check fails, which is the case
+while the scheduler is not running yet.
 
-- [ ] **Step 5: Verify the generated unit file**
-
-```bash
-systemd-analyze --user verify ~/.config/systemd/user/linguapulse.service
-```
-
-Expected: no error about the unit file.
-
-- [ ] **Step 6: Check the install and uninstall round trip in a scratch home**
+- [ ] **Step 5: Check the install and uninstall round trip and the generated unit file in a scratch home**
 
 ```bash
 export XDG_CONFIG_HOME="$(mktemp -d)"
 export LINGUAPULSE_AUTOSTART="$(mktemp)"
-python3 -m linguapulse install --executable /usr/bin/env
+PYTHONPATH=src python3 -m linguapulse install --executable /usr/bin/env
 cat "$LINGUAPULSE_AUTOSTART"
-python3 -m linguapulse uninstall
+systemd-analyze --user verify "$XDG_CONFIG_HOME/systemd/user/linguapulse.service"
+PYTHONPATH=src python3 -m linguapulse uninstall
 ```
 
-Expected: the install writes the unit and adds the marked block, the uninstall
-removes both again and leaves the autostart file otherwise unchanged.
+Expected: the install writes the unit and adds the marked block, the unit file
+passes `systemd-analyze --user verify` (skip that line when `systemd-analyze` is
+not installed), the uninstall removes both again and leaves the autostart file
+otherwise unchanged.
 
-- [ ] **Step 7: Commit (only when the user explicitly requested commits)**
+- [ ] **Step 6: Commit (only when the user explicitly requested commits)**
 
 ```bash
 git add README.md

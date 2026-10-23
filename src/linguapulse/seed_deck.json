@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "cards": {
+    "hello": {
+      "id": "hello",
+      "term": "hello",
+      "source_lang": "en",
+      "translations": {"ar": "مرحبا", "zh": "你好"},
+      "pinyin": "nǐ hǎo",
+      "notes": "",
+      "tags": ["greetings"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "thank-you": {
+      "id": "thank-you",
+      "term": "thank you",
+      "source_lang": "en",
+      "translations": {"ar": "شكرا", "zh": "谢谢", "es": "gracias"},
+      "pinyin": "xiè xie",
+      "notes": "",
+      "tags": ["greetings"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "water": {
+      "id": "water",
+      "term": "water",
+      "source_lang": "en",
+      "translations": {"ar": "ماء", "zh": "水", "fr": "eau"},
+      "pinyin": "shuǐ",
+      "notes": "",
+      "tags": ["food"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "book": {
+      "id": "book",
+      "term": "book",
+      "source_lang": "en",
+      "translations": {"ar": "كتاب", "zh": "书", "tr": "kitap"},
+      "pinyin": "shū",
+      "notes": "",
+      "tags": ["school"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "friend": {
+      "id": "friend",
+      "term": "friend",
+      "source_lang": "en",
+      "translations": {"ar": "صديق", "zh": "朋友"},
+      "pinyin": "péng you",
+      "notes": "",
+      "tags": ["people"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "morning": {
+      "id": "morning",
+      "term": "morning",
+      "source_lang": "en",
+      "translations": {"ar": "صباح", "zh": "早上"},
+      "pinyin": "zǎo shang",
+      "notes": "",
+      "tags": ["time"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "house": {
+      "id": "house",
+      "term": "house",
+      "source_lang": "en",
+      "translations": {"ar": "منزل", "zh": "房子"},
+      "pinyin": "fáng zi",
+      "notes": "",
+      "tags": ["places"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "read": {
+      "id": "read",
+      "term": "read",
+      "source_lang": "en",
+      "translations": {"ar": "يقرأ", "zh": "读"},
+      "pinyin": "dú",
+      "notes": "",
+      "tags": ["verbs"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "eat": {
+      "id": "eat",
+      "term": "eat",
+      "source_lang": "en",
+      "translations": {"ar": "ياكل", "zh": "吃"},
+      "pinyin": "chī",
+      "notes": "",
+      "tags": ["verbs"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    },
+    "go": {
+      "id": "go",
+      "term": "go",
+      "source_lang": "en",
+      "translations": {"ar": "ذهب", "zh": "去"},
+      "pinyin": "qù",
+      "notes": "",
+      "tags": ["verbs"],
+      "created_at": "2026-01-01T09:00:00+00:00"
+    }
+  }
+}
