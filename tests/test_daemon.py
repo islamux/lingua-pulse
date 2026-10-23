@@ -3,11 +3,11 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import linguapulse
-from linguapulse import daemon, models, notify, paths, srs
+from linguapulse import cli, config, daemon, models, notify, paths, srs
 
 PAST = "2020-01-01T09:00:00+00:00"
 DUE = "2026-10-21T08:55:00+00:00"
@@ -94,7 +94,9 @@ def test_the_lock_excludes_a_second_scheduler(home):
     assert handle is not None
     assert daemon.acquire_lock() is None
     handle.close()
-    assert daemon.acquire_lock() is not None
+    second = daemon.acquire_lock()
+    assert second is not None
+    second.close()
 
 
 def test_the_pid_file_is_written_and_removed(home):
@@ -110,6 +112,13 @@ def test_read_pid_ignores_a_broken_pid_file(home):
     assert daemon.read_pid() is None
 
 
+def test_read_pid_rejects_a_process_group_and_every_process(home):
+    pid_file = paths.pid_path()
+    for raw in ("0", "-1"):
+        pid_file.write_text(f"{raw}\n", encoding="utf-8")
+        assert daemon.read_pid() is None
+
+
 def test_signalling_without_a_scheduler_does_nothing(home):
     assert daemon.signal_scheduler() is False
 
@@ -117,12 +126,26 @@ def test_signalling_without_a_scheduler_does_nothing(home):
 def test_signalling_a_running_scheduler_sends_a_wake_up(home):
     received = []
     previous = signal.signal(signal.SIGHUP, lambda signum, frame: received.append(signum))
+    lock = daemon.acquire_lock()
     try:
         daemon.write_pid()
         assert daemon.signal_scheduler() is True
     finally:
         signal.signal(signal.SIGHUP, previous)
+        lock.close()
     assert received == [signal.SIGHUP]
+
+
+def test_a_stale_pid_file_without_the_lock_is_not_signalled(home):
+    received = []
+    previous = signal.signal(signal.SIGHUP, lambda signum, frame: received.append(signum))
+    try:
+        daemon.write_pid()
+        assert daemon.scheduler_is_running() is False
+        assert daemon.signal_scheduler() is False
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+    assert received == []
 
 
 def test_the_failure_log_reports_the_first_and_every_tenth_failure():
@@ -166,6 +189,109 @@ def test_a_grade_saved_while_sending_survives_the_marks(home, moment, monkeypatc
     assert saved.interval_days == graded["state"].interval_days
     assert saved.ease == graded["state"].ease
     assert saved.handled_due == due
+
+
+def test_a_cli_grade_saved_while_sending_survives_the_marks(home, monkeypatch):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    graded = {}
+
+    def grade_while_sending(title, body):
+        assert cli.main(["next", "good"]) == 0
+        graded["state"] = models.load_states(paths.state_path())["hello"]
+        return notify.NotifyResult(True, 0, "")
+
+    monkeypatch.setattr(daemon.notify, "send", grade_while_sending)
+    assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
+    saved = models.load_states(paths.state_path())["hello"]
+    assert saved.reps == graded["state"].reps == 1
+    assert saved.interval_days == graded["state"].interval_days
+    assert saved.ease == graded["state"].ease
+    assert saved.handled_due == due
+
+
+def test_due_reminders_are_marked_when_notifications_are_disabled(home, monkeypatch, capsys):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    config.save_config(config.Config(notify_enabled=False))
+    sent = []
+    monkeypatch.setattr(daemon.notify, "send", lambda title, body: sent.append(title))
+    assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
+    assert sent == []
+    assert models.load_states(paths.state_path())["hello"].handled_due == due
+    captured = capsys.readouterr()
+    assert "notifications are disabled" in captured.err
+    assert "notification problem" not in captured.err
+
+
+def test_the_loop_sleeps_until_the_next_wakeup(home, monkeypatch):
+    fixed = datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(models, "now_utc", lambda: fixed)
+    due = models.iso(fixed + timedelta(hours=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    timeouts = []
+
+    def fake_select(read, write, error, timeout):
+        timeouts.append(timeout)
+        return ([], [], [])
+
+    monkeypatch.setattr(daemon.select, "select", fake_select)
+    assert daemon.run(max_iterations=1) == 0
+    assert timeouts == [3600.0]
+
+
+def test_a_notification_problem_and_the_recovery_are_logged(home, monkeypatch, capsys):
+    due = models.iso(models.now_utc() - timedelta(minutes=1))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(paths.state_path(), {"hello": models.CardState(card_id="hello", due=due)})
+    calls = []
+
+    def flaky(title, body):
+        calls.append(title)
+        if len(calls) == 1:
+            models.save_deck(
+                paths.deck_path(), {"hello": make_card(), "world": make_card("world")}
+            )
+            models.save_states(
+                paths.state_path(),
+                {
+                    "hello": models.CardState(card_id="hello", due=due),
+                    "world": models.CardState(card_id="world", due=due),
+                },
+            )
+            return notify.NotifyResult(False, 1, "Could not connect")
+        return notify.NotifyResult(True, 0, "")
+
+    monkeypatch.setattr(daemon.notify, "send", flaky)
+    assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
+    assert len(calls) == 2
+    captured = capsys.readouterr()
+    assert "notification problem: Could not connect" in captured.err
+    assert "notifications are being delivered again" in captured.err
+
+
+def test_a_broken_deck_does_not_kill_the_scheduler(home, capsys):
+    paths.deck_path().write_text('{"version": 1, "cards": {', encoding="utf-8")
+    assert daemon.run(max_iterations=2, idle_timeout=0.0) == 0
+    captured = capsys.readouterr()
+    assert "error: " in captured.err
+    assert "is not valid JSON" in captured.err
+    assert daemon.read_pid() is None
+    lock = daemon.acquire_lock()
+    assert lock is not None
+    lock.close()
+
+
+def test_a_second_scheduler_reports_the_error(home, capsys):
+    lock = daemon.acquire_lock()
+    try:
+        assert daemon.run(max_iterations=1, idle_timeout=0.0) == 1
+    finally:
+        lock.close()
+    assert "error: another scheduler is already running" in capsys.readouterr().err
 
 
 def test_the_scheduler_stops_on_a_terminate_signal(home):

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from . import models, notify, paths, scheduler
+from . import config, models, notify, paths, scheduler, store
 
 RESCAN_SECONDS = 3600.0
 
@@ -84,9 +84,10 @@ def read_pid(path: Path | None = None) -> int | None:
     except OSError:
         return None
     try:
-        return int(raw)
+        pid = int(raw)
     except ValueError:
         return None
+    return pid if pid > 1 else None
 
 
 def remove_pid(path: Path | None = None) -> None:
@@ -98,11 +99,18 @@ def remove_pid(path: Path | None = None) -> None:
         pass
 
 
-def scheduler_is_running(path: Path | None = None) -> bool:
-    """Return True when a scheduler process is alive."""
-    pid = read_pid(path)
-    if pid is None:
+def _lock_is_free(path: Path | None = None) -> bool:
+    """Return True when no scheduler holds the lock, releasing it again."""
+    target = None if path is None else path.parent / "daemon.lock"
+    handle = acquire_lock(target)
+    if handle is None:
         return False
+    handle.close()
+    return True
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return True when a process with this id still exists."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -112,10 +120,20 @@ def scheduler_is_running(path: Path | None = None) -> bool:
     return True
 
 
+def scheduler_is_running(path: Path | None = None) -> bool:
+    """Return True when a scheduler holds the lock and its process is alive."""
+    if _lock_is_free(path):
+        return False
+    pid = read_pid(path)
+    return pid is not None and _pid_is_alive(pid)
+
+
 def signal_scheduler(path: Path | None = None) -> bool:
     """Ask a running scheduler to recompute its next wake up."""
+    if _lock_is_free(path):
+        return False
     pid = read_pid(path)
-    if pid is None:
+    if pid is None or not _pid_is_alive(pid):
         return False
     try:
         os.kill(pid, signal.SIGHUP)
@@ -165,11 +183,12 @@ def _save_marks(marks: Sequence[tuple[str, str]]) -> dict[str, models.CardState]
     have been recorded while the notification was being sent. Only the marks
     are applied, so the grade keeps its own due, interval and ease.
     """
-    states = models.load_states(paths.state_path())
-    for card_id, due_iso in marks:
-        state = states.setdefault(card_id, models.CardState(card_id=card_id, due=due_iso))
-        state.handled_due = due_iso
-    models.save_states(paths.state_path(), states)
+    with store.state_lock():
+        states = models.load_states(paths.state_path())
+        for card_id, due_iso in marks:
+            state = states.setdefault(card_id, models.CardState(card_id=card_id, due=due_iso))
+            state.handled_due = due_iso
+        models.save_states(paths.state_path(), states)
     return states
 
 
@@ -178,13 +197,16 @@ def deliver_due(
     states: Mapping[str, models.CardState],
     moment: datetime,
     notifier: Callable[[str, str], notify.NotifyResult] | None = None,
+    notify_enabled: bool = True,
 ) -> DeliveryReport:
     """Deliver the reminder that is due and remember that it was handled.
 
     The message of the report is only set when something went wrong, so that
     the caller can log it without writing a line for every empty round. The
     handled marks are returned for the caller to persist, because the states
-    it read may be out of date by the time the notification was sent.
+    it read may be out of date by the time the notification was sent. When
+    notifications are disabled the due occurrences are marked as handled
+    without sending anything.
     """
     send = notifier or notify.send
     pending = scheduler.pending_occurrences(cards, states, moment)
@@ -196,6 +218,9 @@ def deliver_due(
     if not reminder.group:
         marks = _mark_handled(states, reminder.skipped)
         return DeliveryReport((), reminder.skipped, False, "", marks)
+    if not notify_enabled:
+        marks = _mark_handled(states, reminder.handled)
+        return DeliveryReport((), (), False, "", marks)
     title, body = _notification_for(reminder.group)
     result = send(title, body)
     marks = _mark_handled(states, reminder.handled)
@@ -213,17 +238,16 @@ def deliver_due(
 def run(max_iterations: int | None = None, idle_timeout: float | None = None) -> int:
     """Run the scheduler until it is stopped.
 
-    The scheduler sleeps until the exact moment the next card is due. At most
-    once per hour it rescans the files, that is the safety net for a deck
-    that was edited by hand. The optional idle timeout caps that sleep, it is
-    only used by the tests.
+    The scheduler sleeps until the exact moment the next card is due. When
+    nothing is scheduled it rescans the files once an hour, that is the
+    safety net for a deck that was edited by hand. The optional idle timeout
+    caps that sleep, it is only used by the tests.
     """
     paths.ensure_dirs()
     lock = acquire_lock()
     if lock is None:
-        print("another scheduler is already running", file=sys.stderr)
+        print("error: another scheduler is already running", file=sys.stderr)
         return 1
-    write_pid()
     read_fd, write_fd = os.pipe()
     os.set_blocking(read_fd, False)
     failures = FailureLog()
@@ -251,26 +275,56 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
     }
     iterations = 0
     try:
+        write_pid()
+        disabled_notice = False
         while not stop_signals:
-            cards = models.load_deck(paths.deck_path())
-            states = models.load_states(paths.state_path())
-            moment = models.now_utc()
-            report = deliver_due(cards, states, moment)
-            if report.handled:
-                states = _save_marks(report.handled)
-            if report.delivered:
-                print(f"delivered {len(report.delivered)} reminder(s)", flush=True)
-            elif report.skipped:
-                print(f"skipped {len(report.skipped)} stale reminder(s)", flush=True)
-            if report.message and not report.notified:
-                if failures.should_log(report.message):
-                    print(f"notification problem: {report.message}", file=sys.stderr, flush=True)
-            elif report.notified and failures.recovered():
-                print("notifications are being delivered again", file=sys.stderr, flush=True)
-            next_at = scheduler.next_wakeup(cards, states, models.now_utc())
             timeout = RESCAN_SECONDS
-            if next_at is not None:
-                timeout = max(0.0, (next_at - models.now_utc()).total_seconds())
+            try:
+                settings = config.load_config()
+                cards = models.load_deck(paths.deck_path())
+                states = models.load_states(paths.state_path())
+                moment = models.now_utc()
+                report = deliver_due(
+                    cards,
+                    states,
+                    moment,
+                    notify_enabled=settings.notify_enabled,
+                )
+                if report.handled:
+                    states = _save_marks(report.handled)
+                if not settings.notify_enabled:
+                    if report.handled and not disabled_notice:
+                        print(
+                            "notifications are disabled, marking due reminders as handled",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        disabled_notice = True
+                else:
+                    disabled_notice = False
+                    if report.delivered:
+                        print(f"delivered {len(report.delivered)} reminder(s)", flush=True)
+                    elif report.skipped:
+                        print(f"skipped {len(report.skipped)} stale reminder(s)", flush=True)
+                    if report.message and not report.notified:
+                        if failures.should_log(report.message):
+                            print(
+                                f"notification problem: {report.message}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                    elif report.notified and failures.recovered():
+                        print(
+                            "notifications are being delivered again",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                next_at = scheduler.next_wakeup(cards, states, models.now_utc())
+                if next_at is not None:
+                    timeout = max(0.0, (next_at - models.now_utc()).total_seconds())
+            except (ValueError, TypeError, OSError) as error:
+                if failures.should_log(f"round failed: {error}"):
+                    print(f"error: {error}", file=sys.stderr, flush=True)
             if idle_timeout is not None:
                 timeout = idle_timeout
             select.select([read_fd], [], [], timeout)

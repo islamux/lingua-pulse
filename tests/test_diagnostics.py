@@ -74,9 +74,13 @@ def test_the_notification_daemon_check_reports_a_running_daemon(monkeypatch):
 
 
 def test_the_scheduler_check_reports_a_running_scheduler(home):
-    daemon.write_pid()
-    check = diagnostics.check_scheduler()
-    assert check.ok is True
+    lock = daemon.acquire_lock()
+    try:
+        daemon.write_pid()
+        check = diagnostics.check_scheduler()
+        assert check.ok is True
+    finally:
+        lock.close()
 
 
 def test_the_scheduler_check_reports_a_missing_scheduler(home):
