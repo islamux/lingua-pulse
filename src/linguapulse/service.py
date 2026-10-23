@@ -185,6 +185,11 @@ def disable() -> bool:
     return systemctl("disable", UNIT_NAME).returncode == 0
 
 
+def stop() -> bool:
+    """Stop the running user unit, if it is running."""
+    return systemctl("stop", UNIT_NAME).returncode == 0
+
+
 def install(executable: str) -> list[str]:
     """Install the unit and the autostart, and report every step.
 
@@ -215,6 +220,8 @@ def uninstall() -> list[str]:
     """
     check_autostart()
     steps: list[str] = []
+    if stop():
+        steps.append(f"stopped {UNIT_NAME}")
     if disable():
         steps.append(f"disabled {UNIT_NAME}")
     if remove_unit():

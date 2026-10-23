@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from linguapulse import cli, service
@@ -82,6 +84,24 @@ def test_remove_autostart_without_a_block_does_nothing(home, tmp_path, monkeypat
     monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
     assert service.remove_autostart() is False
     assert target.read_text(encoding="utf-8") == "# my own settings\n"
+
+
+def test_uninstall_stops_the_running_service(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    calls = []
+
+    def fake_systemctl(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(["systemctl", "--user", *args], 0, "", "")
+
+    monkeypatch.setattr(service, "systemctl", fake_systemctl)
+    steps = service.uninstall()
+    assert ("stop", service.UNIT_NAME) in calls
+    assert ("disable", service.UNIT_NAME) in calls
+    assert calls.index(("stop", service.UNIT_NAME)) < calls.index(("disable", service.UNIT_NAME))
+    assert f"stopped {service.UNIT_NAME}" in steps
 
 
 def test_install_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
