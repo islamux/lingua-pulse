@@ -462,6 +462,8 @@ def command_config(args: argparse.Namespace) -> int:
         changed = True
     if changed:
         config.save_config(settings)
+    if args.notify is not None:
+        daemon.signal_scheduler()
     print(f"source_lang = {settings.source_lang}")
     print(f"target_lang = {settings.target_lang}")
     print(f"notify_enabled = {str(settings.notify_enabled).lower()}")

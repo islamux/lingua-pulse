@@ -43,7 +43,8 @@ replay a backlog") at the user's explicit request. It is a deliberate change to
 **A. Persisted reminder clock (chosen).** One optional timestamp per card state,
 `last_reminded_at`. The next reminder is `max(due, last_reminded_at + 10
 minutes)`; before the first reminder it is the due time. The daemon sleeps to
-the minimum of the next due time and the next reminder time.
+the earliest reminder time across the deck (which is the due time before the
+first reminder).
 
 **B. Derive the slot from the due time, nothing persisted.** `due + 10k`
 generates the reminders. Rejected: every service restart would notify again
@@ -104,7 +105,9 @@ level and tolerant at the record level.
   notification setting into the wakeup computation, keep the failure log.
 - `diagnostics.py`: follow the `next_wakeup` signature (the doctor keeps showing
   the next wakeup).
-- `cli.py`: unchanged; `status` keeps showing due cards and the next due time.
+- `cli.py`: `config --notify` / `--no-notify` signals the scheduler so the
+  change takes effect immediately, while `status` keeps showing due cards and
+  the next due time.
 
 ## Documentation and spec
 

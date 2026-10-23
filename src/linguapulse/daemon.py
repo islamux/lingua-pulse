@@ -1,4 +1,4 @@
-"""The background scheduler that wakes up when a card becomes due."""
+"""The background scheduler that wakes up at the next due or reminder time."""
 
 from __future__ import annotations
 
@@ -234,7 +234,7 @@ def deliver_due(
 def run(max_iterations: int | None = None, idle_timeout: float | None = None) -> int:
     """Run the scheduler until it is stopped.
 
-    The scheduler sleeps until the exact moment the next card is due. When
+    The scheduler sleeps until the exact next due or reminder time. When
     nothing is scheduled it rescans the files once an hour, that is the
     safety net for a deck that was edited by hand. The optional idle timeout
     caps that sleep, it is only used by the tests.

@@ -53,6 +53,32 @@ def test_the_delivered_card_records_the_reminder_time(moment):
     assert states["hello"].last_reminded_at == models.iso(moment)
 
 
+def test_two_due_cards_share_one_grouped_notification(moment):
+    cards = {
+        "hello": make_card(),
+        "world": models.Card(
+            id="world",
+            term="world",
+            source_lang="en",
+            translations={"ar": "عالم"},
+            created_at=PAST,
+        ),
+    }
+    states = {
+        "hello": models.CardState(card_id="hello", due=DUE),
+        "world": models.CardState(card_id="world", due=DUE),
+    }
+    notifier = FakeNotifier()
+    daemon.deliver_due(cards, states, moment, notifier)
+    assert len(notifier.sent) == 1
+    title, body = notifier.sent[0]
+    assert title == "lingua-pulse: 2 cards are due"
+    assert "hello" in body
+    assert "world" in body
+    assert states["hello"].last_reminded_at == models.iso(moment)
+    assert states["world"].last_reminded_at == models.iso(moment)
+
+
 def test_a_card_is_notified_again_after_ten_minutes(moment):
     cards = {"hello": make_card()}
     states = {"hello": models.CardState(card_id="hello", due=DUE)}

@@ -27,7 +27,7 @@
 - **Restart with a stale clock.** A restart after 11+ minutes must notify immediately; a restart at 2 minutes must wait 8. Pinned by `test_next_wakeup_counts_the_remaining_minutes_of_the_reminder_slot` and `test_a_card_is_notified_again_after_ten_minutes`.
 - **Grade race while sending.** A grade saved during `notify-send` must keep its new due/reps; the old reminder mark must not swallow the new schedule. Pinned by `test_a_grade_saved_while_sending_survives_the_marks`.
 - **Failed send.** The failure must advance the clock so the next attempt is 10 minutes later, never a tight loop. Pinned by `test_a_failing_notification_records_the_reminder_time` and `test_a_failed_notification_is_not_retried_inside_the_slot`.
-- **Notifications disabled.** Nothing is sent and no 10-minute wakeups are scheduled; re-enabling resumes. Pinned by `test_disabled_notifications_record_the_reminder_time` and `test_next_wakeup_ignores_reminders_when_notifications_are_disabled`.
+- **Notifications disabled.** Nothing is sent and no 10-minute wakeups are scheduled; re-enabling resumes. Pinned by `test_disabled_notifications_record_the_reminder_time`, `test_next_wakeup_ignores_reminders_when_notifications_are_disabled` and `test_config_notify_signals_the_scheduler`.
 
 ---
 

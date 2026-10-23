@@ -114,9 +114,12 @@ def test_next_wakeup_ignores_reminders_when_notifications_are_disabled():
     cards = {"hello": make_card()}
     states = {
         "hello": state_for(
-            "hello", "2026-10-21T10:00:00+00:00", last_reminded_at="2026-10-21T08:55:00+00:00"
+            "hello", "2026-10-21T10:00:00+00:00", last_reminded_at="2026-10-21T09:55:00+00:00"
         )
     }
+    assert scheduler.next_wakeup(cards, states, NOW, notify_enabled=True) == datetime(
+        2026, 10, 21, 10, 5, tzinfo=timezone.utc
+    )
     assert scheduler.next_wakeup(cards, states, NOW, notify_enabled=False) == datetime(
         2026, 10, 21, 10, 0, tzinfo=timezone.utc
     )
