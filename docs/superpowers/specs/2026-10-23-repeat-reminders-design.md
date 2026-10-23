@@ -41,9 +41,9 @@ replay a backlog") at the user's explicit request. It is a deliberate change to
 ## Approaches
 
 **A. Persisted reminder clock (chosen).** One optional timestamp per card state,
-`last_reminded_at`. The next reminder is `last_reminded_at + 10 minutes`; before
-the first reminder it is the due time. The daemon sleeps to the minimum of the
-next due time and the next reminder time.
+`last_reminded_at`. The next reminder is `max(due, last_reminded_at + 10
+minutes)`; before the first reminder it is the due time. The daemon sleeps to
+the minimum of the next due time and the next reminder time.
 
 **B. Derive the slot from the due time, nothing persisted.** `due + 10k`
 generates the reminders. Rejected: every service restart would notify again

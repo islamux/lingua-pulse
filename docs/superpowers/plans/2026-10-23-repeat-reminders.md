@@ -678,12 +678,13 @@ Run:
 
 ```bash
 python3 - <<'EOF'
-import pathlib, re
+import pathlib
 readme = pathlib.Path("README.md").read_text(encoding="utf-8")
 plan = pathlib.Path("docs/superpowers/plans/2026-10-21-lingua-pulse.md").read_text(encoding="utf-8")
-match = re.search(r"Replace `README\.md`:\n\n```markdown\n(.*?)\n```", plan, re.S)
-assert match, "the Task 15 README block was not found"
-assert match.group(1).strip("\n") == readme.strip("\n")
+start_marker = "Replace `README.md`:\n\n```markdown\n"
+start = plan.index(start_marker) + len(start_marker)
+end = plan.index("\n```\n\n- [ ] **Step 2: Run the whole test suite**", start)
+assert plan[start:end] == readme.rstrip("\n")
 print("README and Task 15 block match")
 EOF
 ```

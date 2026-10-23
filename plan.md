@@ -34,7 +34,7 @@ Do not repeatedly spawn failing notification processes in a tight loop.
 
 At startup, check whether `notify-send` is installed, but do not send a visible test notification. Check daemon and session-bus availability as part of the implementation environment review; at runtime, treat the result of an actual scheduled delivery as the definitive availability check.
 
-Attempt each scheduled notification once. If delivery fails, log an actionable diagnostic, keep the scheduler running, and do not retry that same reminder. Retry only at a later scheduled occurrence. Rate-limit repeated identical failure messages and report when delivery recovers.
+Deliver each scheduled reminder once per 10-minute slot. A card that is due and ungraded is reminded again every 10 minutes, without a limit, until it is graded. If delivery fails, log an actionable diagnostic, keep the scheduler running, and retry at the next 10-minute slot rather than in a tight loop. Rate-limit repeated identical failure messages and report when delivery recovers.
 
 ### 3. herbstluftwm Startup Integration
 
@@ -130,22 +130,24 @@ If desktop notifications are unavailable, preserve CLI functionality and provide
 - [ ] No graphical interface is required.
 - [ ] All language and Unicode requirements remain satisfied.
 - [ ] Scheduling uses the system's local timezone and behaves consistently across daylight-saving transitions.
-- [ ] Resume/restart catch-up follows the missed-reminder policy in section 9 without replaying a backlog.
-- [ ] The scheduler wakes no more than once per due card, with no periodic polling loop (see the wakeup policy in section 9).
+- [ ] Resume/restart catch-up follows the repeated-reminder policy in section 9 without replaying more than one reminder.
+- [ ] The scheduler wakes once per due or reminder event, with no periodic polling loop (see the wakeup policy in section 9).
 
-### 9. Scheduling and Missed Reminders
+### 9. Scheduling and Repeated Reminders
 
 - Use the system's local timezone and local wall-clock time for schedules, including across daylight-saving transitions.
-- After wake or service restart, send only the latest overdue reminder if it is no more than 15 minutes late. Otherwise, skip missed reminders and wait for the next scheduled occurrence.
-- Never replay a backlog of missed reminders.
-- Persist the identity of the last delivered occurrence so a service restart cannot send it twice.
+- A card that is due and ungraded is reminded at its due time and then every 10 minutes, without a limit, until it is graded.
+- A reminder that fell due while the service was stopped is delivered once, immediately after the service starts, and the 10-minute cadence resumes from there. Never send one reminder per missed slot.
+- Persist the time of the last reminder per card so a restart neither repeats a reminder inside the same 10-minute slot nor loses the cadence.
+- A card graded with `again` is not notifiable: its relearn step stays silent.
 
 #### Wakeup Policy
 
-- The scheduler sleeps until the exact due time of the next card. It computes the remaining delay to the next due card and sleeps for that duration.
+- The scheduler sleeps until the exact next event: a card's due time or a card's next 10-minute reminder.
 - Do not run a periodic polling loop. A background thread that wakes on a fixed interval to check for due cards is not permitted.
-- The number of process wakeups must not exceed the number of due cards. Each due card produces at most one wakeup.
-- Recompute the sleep target after every delivery so that a newly scheduled card is picked up without an extra wakeup.
+- Each due or reminder event produces at most one wakeup; the number of wakeups is bounded by the number of events, not by elapsed time.
+- Recompute the sleep target after every delivery so that a newly scheduled card or reminder is picked up without an extra wakeup.
+- When notifications are disabled, no reminder wakeups are scheduled.
 
 ### 10. Git Workflow
 
