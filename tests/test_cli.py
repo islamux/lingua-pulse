@@ -45,6 +45,7 @@ def test_show_reports_when_nothing_is_due(home, capsys):
 def test_show_uses_the_requested_language_without_storing_it(home, capsys):
     write_deck([make_card()])
     write_states({"hello": models.CardState(card_id="hello", due=PAST)})
+    config.save_config(config.Config(target_lang="ar"))
     assert cli.main(["show", "--reveal", "--lang", "zh"]) == 0
     out = capsys.readouterr().out
     assert out.index("zh:") < out.index("ar:")
@@ -266,7 +267,7 @@ def test_status_reports_the_due_cards_the_next_card_and_the_languages(home, caps
     assert "2 cards" in out
     assert "1 card" in out
     assert "later" in out
-    assert "Languages: source en, target ar" in out
+    assert "Languages: source en, target zh" in out
 
 
 def test_status_reports_a_broken_deck_file(home, capsys):

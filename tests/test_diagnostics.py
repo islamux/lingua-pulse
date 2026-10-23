@@ -191,7 +191,7 @@ def test_the_config_check_reports_the_defaults(home):
     assert check.ok is True
     assert "defaults" in check.detail
     assert "source en" in check.detail
-    assert "target ar" in check.detail
+    assert "target zh" in check.detail
 
 
 def test_the_config_check_reports_the_effective_file(home):
