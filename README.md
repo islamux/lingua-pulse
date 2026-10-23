@@ -30,6 +30,9 @@ linguapulse status                  # what is due and when
 linguapulse doctor                  # check that everything works
 ```
 
+`doctor` exits with 1 until the service is installed, so the `[FAIL] scheduler`
+line is expected before `linguapulse install`.
+
 ## Commands
 
 | Command | What it does |
@@ -56,8 +59,9 @@ occurrence was handled and computes the next wake up.
 
 * Grading a card wakes the scheduler up right away, so the next card is
   scheduled without a delay.
-* At most once per hour the scheduler rescans the files, that is the safety
-  net for a deck that was edited by hand.
+* When nothing is scheduled, the scheduler rechecks the files at most once per
+  hour. A deck that was edited by hand is picked up at that rescan, or when the
+  scheduler next wakes for an already scheduled card.
 * A reminder that is more than 15 minutes late is skipped, not replayed.
 * Older reminders of a backlog are dropped, only the newest one is delivered.
 * A word that you grade with `again` comes back after 10 minutes, without a
@@ -66,14 +70,19 @@ occurrence was handled and computes the next wake up.
 ## How the notifications behave
 
 * One notification per due moment, no retries.
-* When the notification cannot be delivered, the problem is written to the service
-  log (`journalctl --user -u linguapulse.service`) and the reason is actionable.
+* When the notification cannot be delivered, the problem is written to the
+  service log (`journalctl --user -u linguapulse.service`) and the reason is
+  actionable.
 
   If no notification appears, run `linguapulse doctor`: it prints the steps that
   diagnose the failure: a direct `notify-send` test, a `busctl` lookup of the
   notification daemon and the check that `DBUS_SESSION_BUS_ADDRESS` reaches the
   scheduler.
-* Identical failures are logged once and then only every tenth time.
+* Identical failures are logged once and then only every tenth time, and the
+  log reports when delivery recovers (`notifications are being delivered
+  again`).
+* `linguapulse config --no-notify` silences the desktop notifications while
+  cards still come due and are marked handled.
 
 ## Files
 
@@ -89,6 +98,17 @@ occurrence was handled and computes the next wake up.
 Set `LINGUAPULSE_HOME` to move the data, config and state directories under
 one root, which is handy for tests.
 
+## Terminal and fonts
+
+* A UTF-8 locale is required, for example `LANG=en_US.UTF-8`; the Arabic and
+  Chinese terms cannot be shown otherwise.
+* Use a monospace font that covers Arabic and Simplified Chinese. Check the
+  installed fonts with `fc-list :lang=ar` and `fc-list :lang=zh`.
+* Chinese cards carry pinyin with tone marks, the font has to cover them too.
+* Local scheduling needs the time zone database (`tzdata`). Without it the
+  scheduler falls back to UTC.
+* The supported language codes are `ar`, `en`, `es`, `fr`, `tr` and `zh`.
+
 ## Installation of the service
 
 ```bash
@@ -99,13 +119,18 @@ systemctl --user start linguapulse.service
 `install` writes `~/.config/systemd/user/linguapulse.service`, enables it and
 adds a marked block to `~/.config/herbstluftwm/autostart`. Your own autostart
 file is never overwritten and a backup is written to
-`autostart.linguapulse.bak`. Undo it with `linguapulse uninstall`, which removes
-the marked block and the unit again.
+`autostart.linguapulse.bak`. Undo it with `linguapulse uninstall`, which stops
+the running service, disables the unit, and removes the unit and the marked
+block again.
 
 ## Development
 
+The tests need pytest, which the `dev` extra provides:
+
 ```bash
+pip install -e '.[dev]'
 python3 -m pytest -v
 ```
 
-The tests run from the checkout, no installation is needed.
+The tests run from the checkout against `src/`, no other installation is
+needed.
