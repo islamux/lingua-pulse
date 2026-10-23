@@ -5399,6 +5399,8 @@ git commit -m "feat: add diagnostics and the doctor command"
 Create `tests/test_service.py`:
 
 ```python
+import subprocess
+
 import pytest
 
 from linguapulse import cli, service
@@ -5485,6 +5487,24 @@ def test_remove_autostart_without_a_block_does_nothing(home, tmp_path, monkeypat
     assert target.read_text(encoding="utf-8") == "# my own settings\n"
 
 
+def test_uninstall_stops_the_running_service(home, tmp_path, monkeypatch):
+    target = tmp_path / "autostart"
+    monkeypatch.setenv(service.ENV_AUTOSTART, str(target))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    calls = []
+
+    def fake_systemctl(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(["systemctl", "--user", *args], 0, "", "")
+
+    monkeypatch.setattr(service, "systemctl", fake_systemctl)
+    steps = service.uninstall()
+    assert ("stop", service.UNIT_NAME) in calls
+    assert ("disable", service.UNIT_NAME) in calls
+    assert calls.index(("stop", service.UNIT_NAME)) < calls.index(("disable", service.UNIT_NAME))
+    assert f"stopped {service.UNIT_NAME}" in steps
+
+
 def test_install_reports_an_orphan_begin_marker(home, tmp_path, monkeypatch, capsys):
     target = tmp_path / "autostart"
     original = "# my own settings\n# >>> lingua-pulse >>>\nMod4-Shift-q = close\n"
@@ -5539,7 +5559,6 @@ def test_remove_autostart_refuses_an_orphan_end_marker(home, tmp_path, monkeypat
     with pytest.raises(service.MalformedBlock):
         service.remove_autostart()
     assert target.read_text(encoding="utf-8") == original
-
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -5740,6 +5759,11 @@ def disable() -> bool:
     return systemctl("disable", UNIT_NAME).returncode == 0
 
 
+def stop() -> bool:
+    """Stop the running user unit, if it is running."""
+    return systemctl("stop", UNIT_NAME).returncode == 0
+
+
 def install(executable: str) -> list[str]:
     """Install the unit and the autostart, and report every step.
 
@@ -5770,6 +5794,8 @@ def uninstall() -> list[str]:
     """
     check_autostart()
     steps: list[str] = []
+    if stop():
+        steps.append(f"stopped {UNIT_NAME}")
     if disable():
         steps.append(f"disabled {UNIT_NAME}")
     if remove_unit():
@@ -5788,7 +5814,7 @@ def uninstall() -> list[str]:
 
 Run: `python3 -m pytest tests/test_service.py -v`
 
-Expected: PASS, 14 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Add the install and uninstall commands**
 
@@ -5848,7 +5874,7 @@ Add the dispatch entries:
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, 246 tests, every test of every task.
+Expected: PASS, 247 tests, every test of every task.
 
 - [ ] **Step 7: Commit (only when the user explicitly requested commits)**
 
@@ -5990,7 +6016,7 @@ The tests run from the checkout, no installation is needed.
 
 Run: `python3 -m pytest -v`
 
-Expected: PASS, 246 tests, every test of every task.
+Expected: PASS, 247 tests, every test of every task.
 
 - [ ] **Step 3: Check the manual pages of the CLI**
 
