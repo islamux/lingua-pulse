@@ -42,6 +42,43 @@ def test_add_creates_a_due_state(home, capsys):
     assert len(states) == 1
 
 
+def test_add_rejects_an_unknown_translation_language(home, capsys):
+    assert cli.main(["add", "--term", "hello", "--lang", "de", "--text", "hallo"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "unknown language 'de'" in captured.err
+    assert not paths.deck_path().exists()
+
+
+def test_add_rejects_an_unknown_source_language(home, capsys):
+    assert (
+        cli.main(
+            ["add", "--term", "hello", "--source-lang", "xx", "--lang", "ar", "--text", "مرحبا"]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "unknown language 'xx'" in captured.err
+    assert not paths.deck_path().exists()
+
+
+def test_add_rejects_an_empty_term(home, capsys):
+    assert cli.main(["add", "--term", "  ", "--lang", "ar", "--text", "مرحبا"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "term" in captured.err
+    assert not paths.deck_path().exists()
+
+
+def test_add_rejects_an_empty_translation(home, capsys):
+    assert cli.main(["add", "--term", "hello", "--lang", "ar", "--text", " "]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "translation" in captured.err
+    assert not paths.deck_path().exists()
+
+
 def test_add_reports_a_broken_deck_file(home, capsys):
     write_broken_deck()
     assert cli.main(["add", "--term", "new", "--lang", "ar", "--text", "جديد"]) == 1
@@ -58,6 +95,16 @@ def test_list_prints_the_cards(home, capsys):
     out = capsys.readouterr().out
     assert "hello" in out
     assert "مرحبا" in out
+
+
+def test_list_rejects_an_unknown_language(home, capsys):
+    cli.main(["add", "--term", "hello", "--lang", "ar", "--text", "مرحبا"])
+    capsys.readouterr()
+    assert cli.main(["list", "--lang", "xx"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "unknown language 'xx'" in captured.err
+    assert captured.out == ""
 
 
 def test_list_reports_a_broken_deck_file(home, capsys):
@@ -80,6 +127,16 @@ def test_seed_does_not_duplicate_cards(home, capsys):
     assert cli.main(["seed"]) == 0
     assert "0" in capsys.readouterr().out
     assert len(models.load_deck(paths.deck_path())) == len(cli.seed_cards())
+
+
+def test_seed_wakes_the_scheduler_when_it_added_cards(home, capsys, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.daemon, "signal_scheduler", lambda: calls.append(True))
+    assert cli.main(["seed"]) == 0
+    assert calls == [True]
+    capsys.readouterr()
+    assert cli.main(["seed"]) == 0
+    assert calls == [True]
 
 
 def test_seed_reports_a_broken_deck_file(home, capsys):

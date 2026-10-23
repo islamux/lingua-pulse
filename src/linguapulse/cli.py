@@ -250,8 +250,10 @@ def command_next(args: argparse.Namespace) -> int:
     print(review.render_card(card, target_lang=target, reveal=not args.hide))
     print()
     updated = srs.apply_grade(state, args.grade, moment)
-    states[card.id] = updated
-    models.save_states(paths.state_path(), states)
+    with store.state_lock():
+        current = models.load_states(paths.state_path())
+        current[card.id] = updated
+        models.save_states(paths.state_path(), current)
     store.append_jsonl(
         paths.history_path(),
         {
@@ -343,22 +345,34 @@ def command_add(args: argparse.Namespace) -> int:
     if len(args.lang) != len(args.text):
         print("error: every --lang needs exactly one --text", file=sys.stderr)
         return 2
-    loaded = load_deck_and_states()
-    if loaded is None:
-        return 1
-    deck, states = loaded
     settings = config.load_config()
-    source_lang = args.source_lang or settings.source_lang
-    card_id = args.id or card_id_for(args.term)
-    if card_id in deck:
-        print(f"error: a card with the id '{card_id}' already exists", file=sys.stderr)
-        return 1
+    source_lang = resolve_language(args.source_lang, settings.source_lang)
+    if source_lang is None:
+        return 2
+    for language in args.lang:
+        if resolve_language(language, language) is None:
+            return 2
+    term = text.normalize(args.term)
+    if not term.strip():
+        print("error: the term must not be empty", file=sys.stderr)
+        return 2
     translations = {
         language: text.normalize(value) for language, value in zip(args.lang, args.text)
     }
+    if any(not value.strip() for value in translations.values()):
+        print("error: a translation must not be empty", file=sys.stderr)
+        return 2
+    loaded = load_deck_and_states()
+    if loaded is None:
+        return 1
+    deck, _ = loaded
+    card_id = args.id or card_id_for(term)
+    if card_id in deck:
+        print(f"error: a card with the id '{card_id}' already exists", file=sys.stderr)
+        return 1
     card = models.Card(
         id=card_id,
-        term=text.normalize(args.term),
+        term=term,
         source_lang=source_lang,
         translations=translations,
         pinyin=text.normalize(args.pinyin) if args.pinyin else "",
@@ -368,9 +382,10 @@ def command_add(args: argparse.Namespace) -> int:
     )
     deck[card.id] = card
     models.save_deck(paths.deck_path(), deck)
-    if card.id not in states:
-        states[card.id] = srs.new_state(card.id, models.now_utc())
-        models.save_states(paths.state_path(), states)
+    with store.state_lock():
+        current = models.load_states(paths.state_path())
+        current.setdefault(card.id, srs.new_state(card.id, models.now_utc()))
+        models.save_states(paths.state_path(), current)
     print(f"Added '{card.id}' ({card.source_lang} -> {', '.join(sorted(card.translations))}).")
     daemon.signal_scheduler()
     return 0
@@ -378,6 +393,8 @@ def command_add(args: argparse.Namespace) -> int:
 
 def command_list(args: argparse.Namespace) -> int:
     """List the cards of the deck."""
+    if args.lang is not None and resolve_language(args.lang, args.lang) is None:
+        return 2
     paths.ensure_dirs()
     loaded = load_deck_and_states()
     if loaded is None:
@@ -403,18 +420,23 @@ def command_seed(args: argparse.Namespace) -> int:
     loaded = load_deck_and_states()
     if loaded is None:
         return 1
-    deck, states = loaded
-    added = 0
+    deck, _ = loaded
+    added: list[str] = []
     for card in seed_cards(args.limit):
         if card.id in deck:
             continue
         deck[card.id] = card
-        states.setdefault(card.id, srs.new_state(card.id, models.now_utc()))
-        added += 1
+        added.append(card.id)
     if added:
         models.save_deck(paths.deck_path(), deck)
-        models.save_states(paths.state_path(), states)
-    print(f"Added {added} seed card(s), the deck holds {len(deck)} card(s).")
+        with store.state_lock():
+            current = models.load_states(paths.state_path())
+            for card_id in added:
+                current.setdefault(card_id, srs.new_state(card_id, models.now_utc()))
+            models.save_states(paths.state_path(), current)
+    print(f"Added {len(added)} seed card(s), the deck holds {len(deck)} card(s).")
+    if added:
+        daemon.signal_scheduler()
     return 0
 
 

@@ -8,7 +8,7 @@ from conftest import (
     write_malformed_states,
     write_states,
 )
-from linguapulse import cli, config, models, paths, store
+from linguapulse import cli, config, daemon, models, paths, srs, store
 
 PAST = "2020-01-01T09:00:00+00:00"
 FUTURE = "2099-01-01T09:00:00+00:00"
@@ -116,6 +116,27 @@ def test_next_grades_the_due_card_and_records_the_review(home, capsys):
     entries = store.read_jsonl(paths.history_path())
     assert entries[-1]["card_id"] == "hello"
     assert entries[-1]["grade"] == "good"
+
+
+def test_a_daemon_mark_saved_during_a_grade_survives(home, capsys, monkeypatch):
+    write_deck([make_card("hello"), make_card("later")])
+    write_states(
+        {
+            "hello": models.CardState(card_id="hello", due=PAST),
+            "later": models.CardState(card_id="later", due=PAST),
+        }
+    )
+    original = srs.apply_grade
+
+    def grade_after_the_daemon_marks(state, grade, moment=None, zone=None):
+        daemon._save_marks([("later", PAST)])
+        return original(state, grade, moment, zone)
+
+    monkeypatch.setattr(cli.srs, "apply_grade", grade_after_the_daemon_marks)
+    assert cli.main(["next", "good"]) == 0
+    states = models.load_states(paths.state_path())
+    assert states["later"].handled_due == PAST
+    assert states["hello"].reps == 1
 
 
 def test_next_reports_when_nothing_is_due(home, capsys):

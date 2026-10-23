@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+from . import paths
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -42,6 +46,26 @@ def write_json(path: Path, payload: Any) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+@contextlib.contextmanager
+def state_lock(path: Path | None = None) -> Iterator[None]:
+    """Serialize the writers of the state file with an exclusive file lock.
+
+    Every writer re-reads the state file under this lock and applies only its
+    own change, so a scheduler mark and a grade recorded at the same moment
+    never overwrite each other. The lock is never held while a notification
+    is sent.
+    """
+    target = path or paths.state_dir() / "state.lock"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(target, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def append_jsonl(path: Path, payload: Any) -> None:
