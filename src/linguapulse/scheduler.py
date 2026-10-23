@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, Mapping
 
 from . import models
-from .srs import GRACE_MINUTES
+from .srs import REMINDER_MINUTES
 
 
 @dataclass(frozen=True)
@@ -22,20 +22,6 @@ class Occurrence:
     def due_iso(self) -> str:
         """Return the due time as an ISO 8601 timestamp."""
         return self.due.isoformat()
-
-
-@dataclass(frozen=True)
-class Reminder:
-    """The outcome of planning a reminder for one wake up."""
-
-    due: datetime
-    group: tuple[Occurrence, ...]
-    skipped: tuple[Occurrence, ...]
-
-    @property
-    def handled(self) -> tuple[Occurrence, ...]:
-        """Return every occurrence that was acted on, delivered or skipped."""
-        return self.group + self.skipped
 
 
 def occurrence_due(
@@ -59,26 +45,24 @@ def occurrence_due(
     return moment
 
 
-def _scheduled_review(
+def reminder_time(
     card: models.Card,
     state: models.CardState | None,
     moment: datetime,
-) -> Occurrence | None:
-    """Return the scheduled review of a card, or None when it has none.
+) -> datetime | None:
+    """Return the time of the next reminder for one card, if it has one.
 
     A card without a state has no scheduled review: it is never due, it never
     wakes the scheduler up and it is never reminded. The relearn step of an
-    "again" grade is not notifiable, so it is not reminded either. An
-    occurrence that was already acted on is not a review any more.
+    "again" grade is not notifiable, so it is not reminded either.
     """
     if state is None or not state.notifiable:
         return None
     due = occurrence_due(card, state, moment)
-    if state.handled_due:
-        handled = models.safe_parse_iso(state.handled_due)
-        if handled is not None and handled == due:
-            return None
-    return Occurrence(card=card, due=due, state=state)
+    last = models.safe_parse_iso(state.last_reminded_at)
+    if last is None:
+        return due
+    return max(due, last + timedelta(minutes=REMINDER_MINUTES))
 
 
 def pending_occurrences(
@@ -86,13 +70,17 @@ def pending_occurrences(
     states: Mapping[str, models.CardState],
     moment: datetime,
 ) -> list[Occurrence]:
-    """Return the occurrences that are due and that were not acted on yet."""
+    """Return the cards that are due and whose reminder slot has passed."""
     pending: list[Occurrence] = []
     for card_id in sorted(cards):
-        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
-        if occurrence is None or occurrence.due > moment:
+        card = cards[card_id]
+        state = states.get(card_id)
+        slot = reminder_time(card, state, moment)
+        if slot is None or slot > moment:
             continue
-        pending.append(occurrence)
+        pending.append(
+            Occurrence(card=card, due=occurrence_due(card, state, moment), state=state)
+        )
     return pending
 
 
@@ -100,25 +88,24 @@ def next_wakeup(
     cards: Mapping[str, models.Card],
     states: Mapping[str, models.CardState],
     moment: datetime,
+    notify_enabled: bool = True,
 ) -> datetime | None:
-    """Return the exact time of the next occurrence worth waking up for."""
+    """Return the exact time of the next event worth waking up for."""
     candidates: list[datetime] = []
     for card_id in sorted(cards):
-        occurrence = _scheduled_review(cards[card_id], states.get(card_id), moment)
-        if occurrence is None or occurrence.due <= moment:
-            continue
-        candidates.append(occurrence.due)
+        card = cards[card_id]
+        state = states.get(card_id)
+        if notify_enabled:
+            slot = reminder_time(card, state, moment)
+            if slot is not None:
+                candidates.append(slot)
+        elif state is not None and state.notifiable:
+            due = occurrence_due(card, state, moment)
+            if due > moment:
+                candidates.append(due)
     return min(candidates) if candidates else None
 
 
-def plan_reminder(pending: Iterable[Occurrence], moment: datetime) -> Reminder | None:
-    """Pick the single reminder to deliver and mark the older ones as skipped."""
-    ordered = sorted(pending, key=lambda occurrence: occurrence.due)
-    if not ordered:
-        return None
-    latest = ordered[-1].due
-    group = tuple(occurrence for occurrence in ordered if occurrence.due == latest)
-    older = tuple(occurrence for occurrence in ordered if occurrence.due != latest)
-    if (moment - latest).total_seconds() > GRACE_MINUTES * 60:
-        return Reminder(due=latest, group=(), skipped=tuple(ordered))
-    return Reminder(due=latest, group=group, skipped=older)
+def plan_reminder(pending: Iterable[Occurrence]) -> tuple[Occurrence, ...]:
+    """Group every pending occurrence into one reminder, oldest first."""
+    return tuple(sorted(pending, key=lambda occurrence: occurrence.due))

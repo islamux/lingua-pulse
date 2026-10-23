@@ -146,7 +146,7 @@ class CardState:
     reps: int = 0
     lapses: int = 0
     last_graded_at: str | None = None
-    handled_due: str | None = None
+    last_reminded_at: str | None = None
     notifiable: bool = True
 
     def due_dt(self) -> datetime:
@@ -162,7 +162,7 @@ class CardState:
             "reps": self.reps,
             "lapses": self.lapses,
             "last_graded_at": self.last_graded_at,
-            "handled_due": self.handled_due,
+            "last_reminded_at": self.last_reminded_at,
             "notifiable": self.notifiable,
         }
 
@@ -176,7 +176,7 @@ class CardState:
             reps=int(raw.get("reps", 0)),
             lapses=int(raw.get("lapses", 0)),
             last_graded_at=raw.get("last_graded_at"),
-            handled_due=raw.get("handled_due"),
+            last_reminded_at=raw.get("last_reminded_at"),
             notifiable=bool(raw.get("notifiable", True)),
         )
 

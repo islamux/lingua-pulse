@@ -205,13 +205,16 @@ def check_schedule() -> Check:
     try:
         cards = models.load_deck(paths.deck_path())
         states = models.load_states(paths.state_path())
+        settings = config.load_config()
     except (OSError, TypeError, ValueError) as exc:
         return Check("schedule", False, f"the deck or state file cannot be read: {exc}")
     moment = models.now_utc()
     pending = scheduler.pending_occurrences(cards, states, moment)
     if pending:
         return Check("schedule", True, f"{_counted(len(pending), 'card')} due now")
-    upcoming = scheduler.next_wakeup(cards, states, moment)
+    upcoming = scheduler.next_wakeup(
+        cards, states, moment, notify_enabled=settings.notify_enabled
+    )
     if upcoming is None:
         return Check("schedule", True, "nothing is scheduled")
     return Check("schedule", True, f"next wakeup at {upcoming.isoformat()}")

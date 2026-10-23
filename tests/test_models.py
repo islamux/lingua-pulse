@@ -69,9 +69,20 @@ def test_card_state_round_trip():
     state = models.CardState(
         card_id="hello",
         due="2026-10-22T09:00:00+00:00",
-        handled_due="2026-10-21T09:00:00+00:00",
+        last_reminded_at="2026-10-21T09:00:00+00:00",
     )
     assert models.CardState.from_dict(state.to_dict()) == state
+
+
+def test_an_old_state_file_ignores_handled_due():
+    state = models.CardState.from_dict(
+        {
+            "card_id": "hello",
+            "due": "2026-10-22T09:00:00+00:00",
+            "handled_due": "2026-10-21T09:00:00+00:00",
+        }
+    )
+    assert state.last_reminded_at is None
 
 
 def test_card_state_due_dt_parses_the_timestamp():
@@ -88,7 +99,7 @@ def test_save_and_load_states_round_trip(tmp_path):
         "hello": models.CardState(
             card_id="hello",
             due="2026-10-22T09:00:00+00:00",
-            handled_due="2026-10-21T09:00:00+00:00",
+            last_reminded_at="2026-10-21T09:00:00+00:00",
         )
     }
     target = tmp_path / "state.json"

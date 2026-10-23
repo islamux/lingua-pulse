@@ -21,45 +21,49 @@ def state_for(card_id, due, **overrides):
     return models.CardState.from_dict(data)
 
 
-def test_pending_occurrences_holds_the_cards_that_are_due():
+def test_a_due_card_is_pending():
     cards = {"hello": make_card()}
     states = {"hello": state_for("hello", "2026-10-21T08:00:00+00:00")}
-    pending = scheduler.pending_occurrences(cards, states, NOW)
-    assert [occurrence.card.id for occurrence in pending] == ["hello"]
+    assert [o.card.id for o in scheduler.pending_occurrences(cards, states, NOW)] == ["hello"]
 
 
-def test_pending_occurrences_skips_cards_that_are_not_due_yet():
+def test_a_card_that_is_not_due_is_not_pending():
     cards = {"hello": make_card()}
     states = {"hello": state_for("hello", "2026-10-21T10:00:00+00:00")}
     assert scheduler.pending_occurrences(cards, states, NOW) == []
 
 
-def test_pending_occurrences_skips_an_occurrence_that_was_already_handled():
+def test_a_reminder_is_not_repeated_inside_the_ten_minute_slot():
     cards = {"hello": make_card()}
     states = {
         "hello": state_for(
-            "hello",
-            "2026-10-21T08:00:00+00:00",
-            handled_due="2026-10-21T08:00:00+00:00",
+            "hello", "2026-10-21T08:00:00+00:00", last_reminded_at="2026-10-21T08:55:00+00:00"
         )
     }
     assert scheduler.pending_occurrences(cards, states, NOW) == []
 
 
-def test_pending_occurrences_reminds_a_card_that_got_a_new_due_time():
+def test_a_reminder_repeats_at_the_exact_ten_minute_boundary():
     cards = {"hello": make_card()}
     states = {
         "hello": state_for(
-            "hello",
-            "2026-10-21T08:00:00+00:00",
-            handled_due="2026-10-20T08:00:00+00:00",
+            "hello", "2026-10-21T08:00:00+00:00", last_reminded_at="2026-10-21T08:50:00+00:00"
         )
     }
-    pending = scheduler.pending_occurrences(cards, states, NOW)
-    assert [occurrence.card.id for occurrence in pending] == ["hello"]
+    assert [o.card.id for o in scheduler.pending_occurrences(cards, states, NOW)] == ["hello"]
 
 
-def test_pending_occurrences_skips_relearn_cards():
+def test_a_broken_reminder_clock_is_treated_as_never_reminded():
+    cards = {"hello": make_card()}
+    states = {
+        "hello": state_for(
+            "hello", "2026-10-21T08:00:00+00:00", last_reminded_at="not a timestamp"
+        )
+    }
+    assert [o.card.id for o in scheduler.pending_occurrences(cards, states, NOW)] == ["hello"]
+
+
+def test_a_relearn_card_is_never_pending():
     cards = {"hello": make_card()}
     states = {"hello": state_for("hello", "2026-10-21T08:55:00+00:00", notifiable=False)}
     assert scheduler.pending_occurrences(cards, states, NOW) == []
@@ -71,19 +75,7 @@ def test_a_card_without_a_state_has_no_scheduled_review():
     assert scheduler.next_wakeup(cards, {}, NOW) is None
 
 
-def test_a_card_without_a_state_does_not_suppress_a_card_that_is_due():
-    cards = {
-        "fresh": make_card("fresh", created_at="2026-10-21T08:58:00+00:00"),
-        "due": make_card("due"),
-    }
-    states = {"due": state_for("due", "2026-10-21T08:55:00+00:00")}
-    pending = scheduler.pending_occurrences(cards, states, NOW)
-    reminder = scheduler.plan_reminder(pending, NOW)
-    assert [occurrence.card.id for occurrence in reminder.group] == ["due"]
-    assert reminder.skipped == ()
-
-
-def test_next_wakeup_returns_the_soonest_future_occurrence():
+def test_next_wakeup_returns_the_soonest_future_due():
     cards = {"hello": make_card(), "world": make_card()}
     states = {
         "hello": state_for("hello", "2026-10-22T09:00:00+00:00"),
@@ -92,86 +84,63 @@ def test_next_wakeup_returns_the_soonest_future_occurrence():
     assert scheduler.next_wakeup(cards, states, NOW) == datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
 
 
-def test_next_wakeup_is_none_without_a_future_occurrence():
-    cards = {"hello": make_card()}
-    states = {"hello": state_for("hello", "2026-10-20T09:00:00+00:00")}
-    assert scheduler.next_wakeup(cards, states, NOW) is None
-
-
-def test_a_relearn_card_does_not_produce_a_wakeup():
-    cards = {"hello": make_card()}
-    states = {"hello": state_for("hello", "2026-10-21T12:00:00+00:00", notifiable=False)}
-    assert scheduler.next_wakeup(cards, states, NOW) is None
-
-
-def test_an_already_handled_occurrence_does_not_produce_a_wakeup():
+def test_next_wakeup_counts_the_remaining_minutes_of_the_reminder_slot():
     cards = {"hello": make_card()}
     states = {
         "hello": state_for(
-            "hello",
-            "2026-10-21T12:00:00+00:00",
-            handled_due="2026-10-21T12:00:00+00:00",
+            "hello", "2026-10-21T08:00:00+00:00", last_reminded_at="2026-10-21T08:55:00+00:00"
         )
     }
-    assert scheduler.next_wakeup(cards, states, NOW) is None
+    assert scheduler.next_wakeup(cards, states, NOW) == datetime(2026, 10, 21, 9, 5, tzinfo=timezone.utc)
 
 
-def test_the_latest_overdue_reminder_within_the_grace_window_is_selected():
-    cards = {"old": make_card("old"), "late": make_card("late")}
-    states = {
-        "old": state_for("old", "2026-10-21T06:00:00+00:00"),
-        "late": state_for("late", "2026-10-21T08:55:00+00:00"),
-    }
-    pending = scheduler.pending_occurrences(cards, states, NOW)
-    reminder = scheduler.plan_reminder(pending, NOW)
-    assert [occurrence.card.id for occurrence in reminder.group] == ["late"]
-    assert [occurrence.card.id for occurrence in reminder.skipped] == ["old"]
-    assert reminder.due == datetime(2026, 10, 21, 8, 55, tzinfo=timezone.utc)
-
-
-def test_a_reminder_that_is_exactly_at_the_grace_limit_is_delivered():
+def test_a_reminder_slot_in_the_past_is_returned_for_an_immediate_wakeup():
     cards = {"hello": make_card()}
-    states = {"hello": state_for("hello", "2026-10-21T08:45:00+00:00")}
-    pending = scheduler.pending_occurrences(cards, states, NOW)
-    reminder = scheduler.plan_reminder(pending, NOW)
-    assert [occurrence.card.id for occurrence in reminder.group] == ["hello"]
-    assert reminder.skipped == ()
+    states = {
+        "hello": state_for(
+            "hello", "2026-10-21T08:00:00+00:00", last_reminded_at="2026-10-21T08:20:00+00:00"
+        )
+    }
+    assert scheduler.next_wakeup(cards, states, NOW) == datetime(2026, 10, 21, 8, 30, tzinfo=timezone.utc)
 
 
-def test_older_reminders_are_never_replayed():
+def test_a_card_that_was_never_reminded_wakes_at_its_past_due():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-20T09:00:00+00:00")}
+    assert scheduler.next_wakeup(cards, states, NOW) == datetime(2026, 10, 20, 9, 0, tzinfo=timezone.utc)
+
+
+def test_next_wakeup_ignores_reminders_when_notifications_are_disabled():
+    cards = {"hello": make_card()}
+    states = {
+        "hello": state_for(
+            "hello", "2026-10-21T10:00:00+00:00", last_reminded_at="2026-10-21T08:55:00+00:00"
+        )
+    }
+    assert scheduler.next_wakeup(cards, states, NOW, notify_enabled=False) == datetime(
+        2026, 10, 21, 10, 0, tzinfo=timezone.utc
+    )
+
+
+def test_next_wakeup_without_notifications_is_none_for_an_overdue_card():
+    cards = {"hello": make_card()}
+    states = {"hello": state_for("hello", "2026-10-21T08:00:00+00:00")}
+    assert scheduler.next_wakeup(cards, states, NOW, notify_enabled=False) is None
+
+
+def test_plan_reminder_groups_every_pending_card():
     cards = {"old": make_card("old"), "late": make_card("late")}
     states = {
         "old": state_for("old", "2026-10-21T06:00:00+00:00"),
         "late": state_for("late", "2026-10-21T08:55:00+00:00"),
     }
     pending = scheduler.pending_occurrences(cards, states, NOW)
-    reminder = scheduler.plan_reminder(pending, NOW)
-    assert len(reminder.handled) == 2
-
-
-def test_stale_backlog_is_not_delivered():
-    cards = {"old": make_card("old")}
-    states = {"old": state_for("old", "2026-10-21T06:00:00+00:00")}
-    pending = scheduler.pending_occurrences(cards, states, NOW)
-    reminder = scheduler.plan_reminder(pending, NOW)
-    assert reminder.group == ()
-    assert [occurrence.card.id for occurrence in reminder.skipped] == ["old"]
-
-
-def test_cards_that_are_due_at_the_same_moment_form_one_group():
-    cards = {"a": make_card("a"), "b": make_card("b")}
-    states = {
-        "a": state_for("a", "2026-10-21T08:55:00+00:00"),
-        "b": state_for("b", "2026-10-21T08:55:00+00:00"),
-    }
-    pending = scheduler.pending_occurrences(cards, states, NOW)
-    reminder = scheduler.plan_reminder(pending, NOW)
-    assert sorted(occurrence.card.id for occurrence in reminder.group) == ["a", "b"]
-    assert reminder.skipped == ()
+    group = scheduler.plan_reminder(pending)
+    assert [o.card.id for o in group] == ["old", "late"]
 
 
 def test_an_empty_backlog_plans_nothing():
-    assert scheduler.plan_reminder([], NOW) is None
+    assert scheduler.plan_reminder([]) == ()
 
 
 def test_a_broken_due_falls_back_to_the_creation_time():
