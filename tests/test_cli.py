@@ -136,8 +136,21 @@ def test_a_daemon_mark_saved_during_a_grade_survives(home, capsys, monkeypatch):
     monkeypatch.setattr(cli.srs, "apply_grade", grade_after_the_daemon_marks)
     assert cli.main(["next", "good"]) == 0
     states = models.load_states(paths.state_path())
-    assert states["later"].handled_due == PAST
+    assert states["later"].last_reminded_at == PAST
     assert states["hello"].reps == 1
+
+
+def test_grading_clears_the_reminder_clock(home, capsys):
+    write_deck([make_card()])
+    write_states(
+        {
+            "hello": models.CardState(
+                card_id="hello", due=PAST, last_reminded_at="2026-10-21T08:00:00+00:00"
+            )
+        }
+    )
+    assert cli.main(["next", "good"]) == 0
+    assert models.load_states(paths.state_path())["hello"].last_reminded_at is None
 
 
 def test_next_reports_when_nothing_is_due(home, capsys):

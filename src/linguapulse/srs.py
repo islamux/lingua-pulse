@@ -12,7 +12,7 @@ MIN_EASE = 1.3
 MAX_EASE = 2.8
 MAX_INTERVAL_DAYS = 365.0
 RELEARN_MINUTES = 10
-GRACE_MINUTES = 15
+REMINDER_MINUTES = 10
 
 
 def new_state(card_id: str, moment: datetime | None = None) -> models.CardState:
@@ -89,6 +89,5 @@ def apply_grade(
         reps=reps,
         lapses=lapses,
         last_graded_at=models.iso(moment),
-        handled_due=None,
         notifiable=notifiable,
     )

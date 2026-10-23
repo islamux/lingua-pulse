@@ -73,11 +73,11 @@ def test_the_interval_is_capped():
     assert state.interval_days == srs.MAX_INTERVAL_DAYS
 
 
-def test_grading_clears_the_handled_occurrence():
+def test_grading_clears_the_reminder_clock():
     first = srs.apply_grade(srs.new_state("hello", NOW), "good", NOW, ZONE)
-    first.handled_due = first.due
+    first.last_reminded_at = "2026-10-21T09:00:00+00:00"
     second = srs.apply_grade(first, "good", NOW, ZONE)
-    assert second.handled_due is None
+    assert second.last_reminded_at is None
 
 
 def test_an_unknown_grade_is_rejected():
@@ -100,7 +100,7 @@ def test_apply_grade_does_not_mutate_the_input_state():
         state.ease,
         state.reps,
         state.lapses,
-        state.handled_due,
+        state.last_reminded_at,
         state.notifiable,
     )
     _ = srs.apply_grade(state, "good", NOW, ZONE)
@@ -110,7 +110,7 @@ def test_apply_grade_does_not_mutate_the_input_state():
         state.ease,
         state.reps,
         state.lapses,
-        state.handled_due,
+        state.last_reminded_at,
         state.notifiable,
     )
     assert after == before

@@ -2,11 +2,11 @@
 
 A terminal first vocabulary trainer for Linux desktops. It keeps a small deck
 of words in a plain JSON file, schedules every word with spaced repetition and
-reminds you once, exactly when the word is due.
+reminds you when the word is due and keeps reminding you until you grade it.
 
 * No GUI, no tray icon, no web server, no background database.
 * Standard library only, Python 3.11 or newer.
-* One notification per due moment, never a pile of leftovers.
+* A due card reminds you every 10 minutes until you grade it.
 
 ## Install
 
@@ -53,23 +53,24 @@ line is expected before `linguapulse install`.
 
 ## How the scheduler works
 
-The scheduler sleeps until the exact moment the next card is due. It does not
-poll. When it wakes up it delivers one notification, remembers that the
-occurrence was handled and computes the next wake up.
+When it wakes up it delivers one notification, records the reminder time and
+computes the next wake up.
 
 * Grading a card wakes the scheduler up right away, so the next card is
   scheduled without a delay.
 * When nothing is scheduled, the scheduler rechecks the files at most once per
   hour. A deck that was edited by hand is picked up at that rescan, or when the
   scheduler next wakes for an already scheduled card.
-* A reminder that is more than 15 minutes late is skipped, not replayed.
-* Older reminders of a backlog are dropped, only the newest one is delivered.
+* A due card that you do not grade reminds you again every 10 minutes, without
+  a limit, until you grade it.
+* After a restart, a missed reminder is delivered once and the 10-minute
+  cadence resumes from there; missed slots are never replayed.
 * A word that you grade with `again` comes back after 10 minutes, without a
   notification, so that you can relearn it in the terminal.
 
 ## How the notifications behave
 
-* One notification per due moment, no retries.
+* A due card notifies at its due time and then every 10 minutes until you grade it.
 * When the notification cannot be delivered, the problem is written to the
   service log (`journalctl --user -u linguapulse.service`) and the reason is
   actionable.
@@ -81,8 +82,7 @@ occurrence was handled and computes the next wake up.
 * Identical failures are logged once and then only every tenth time, and the
   log reports when delivery recovers (`notifications are being delivered
   again`).
-* `linguapulse config --no-notify` silences the desktop notifications while
-  cards still come due and are marked handled.
+* `linguapulse config --no-notify` silences the desktop notifications; cards still come due, and no reminder wakeups are scheduled until notifications are enabled again.
 
 ## Files
 

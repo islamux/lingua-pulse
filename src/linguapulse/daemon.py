@@ -1,4 +1,4 @@
-"""The background scheduler that wakes up when a card becomes due."""
+"""The background scheduler that wakes up at the next due or reminder time."""
 
 from __future__ import annotations
 
@@ -24,10 +24,9 @@ class DeliveryReport:
     """The outcome of one delivery round."""
 
     delivered: tuple[scheduler.Occurrence, ...]
-    skipped: tuple[scheduler.Occurrence, ...]
     notified: bool
     message: str
-    handled: tuple[tuple[str, str], ...] = ()
+    reminded: tuple[tuple[str, str], ...] = ()
 
 
 class FailureLog:
@@ -160,24 +159,25 @@ def _notification_for(group: Sequence[scheduler.Occurrence]) -> tuple[str, str]:
     return title, "\n".join(lines)
 
 
-def _mark_handled(
+def _mark_reminded(
     states: Mapping[str, models.CardState],
     occurrences: Sequence[scheduler.Occurrence],
+    moment: datetime,
 ) -> tuple[tuple[str, str], ...]:
-    """Remember that these occurrences were acted on and return their marks."""
+    """Record the reminder time on these cards and return their marks."""
+    at = models.iso(moment)
     marks: list[tuple[str, str]] = []
     for occurrence in occurrences:
         state = occurrence.state
         if state is None:
             continue
-        mark = (occurrence.card.id, occurrence.due.isoformat())
-        marks.append(mark)
-        state.handled_due = mark[1]
+        marks.append((occurrence.card.id, at))
+        state.last_reminded_at = at
     return tuple(marks)
 
 
 def _save_marks(marks: Sequence[tuple[str, str]]) -> dict[str, models.CardState]:
-    """Apply the handled marks to the current state file and save it.
+    """Apply the reminder marks to the current state file and save it.
 
     The states are read again right before the write, because a grade may
     have been recorded while the notification was being sent. Only the marks
@@ -185,9 +185,11 @@ def _save_marks(marks: Sequence[tuple[str, str]]) -> dict[str, models.CardState]
     """
     with store.state_lock():
         states = models.load_states(paths.state_path())
-        for card_id, due_iso in marks:
-            state = states.setdefault(card_id, models.CardState(card_id=card_id, due=due_iso))
-            state.handled_due = due_iso
+        for card_id, at in marks:
+            state = states.setdefault(
+                card_id, models.CardState(card_id=card_id, due=at, last_reminded_at=at)
+            )
+            state.last_reminded_at = at
         models.save_states(paths.state_path(), states)
     return states
 
@@ -199,36 +201,30 @@ def deliver_due(
     notifier: Callable[[str, str], notify.NotifyResult] | None = None,
     notify_enabled: bool = True,
 ) -> DeliveryReport:
-    """Deliver the reminder that is due and remember that it was handled.
+    """Deliver the reminder that is due and record when it was sent.
 
     The message of the report is only set when something went wrong, so that
     the caller can log it without writing a line for every empty round. The
-    handled marks are returned for the caller to persist, because the states
+    reminder marks are returned for the caller to persist, because the states
     it read may be out of date by the time the notification was sent. When
-    notifications are disabled the due occurrences are marked as handled
-    without sending anything.
+    notifications are disabled the due occurrences are marked without sending
+    anything, and no reminder wakeup is scheduled.
     """
     send = notifier or notify.send
     pending = scheduler.pending_occurrences(cards, states, moment)
-    if not pending:
-        return DeliveryReport((), (), False, "")
-    reminder = scheduler.plan_reminder(pending, moment)
-    if reminder is None:
-        return DeliveryReport((), (), False, "")
-    if not reminder.group:
-        marks = _mark_handled(states, reminder.skipped)
-        return DeliveryReport((), reminder.skipped, False, "", marks)
+    group = scheduler.plan_reminder(pending)
+    if not group:
+        return DeliveryReport((), False, "")
     if not notify_enabled:
-        marks = _mark_handled(states, reminder.handled)
-        return DeliveryReport((), (), False, "", marks)
-    title, body = _notification_for(reminder.group)
+        marks = _mark_reminded(states, group, moment)
+        return DeliveryReport((), False, "", marks)
+    title, body = _notification_for(group)
     result = send(title, body)
-    marks = _mark_handled(states, reminder.handled)
+    marks = _mark_reminded(states, group, moment)
     if result.ok:
-        return DeliveryReport(reminder.group, reminder.skipped, True, "", marks)
+        return DeliveryReport(group, True, "", marks)
     return DeliveryReport(
-        reminder.group,
-        reminder.skipped,
+        group,
         False,
         result.message or "the notification failed",
         marks,
@@ -238,7 +234,7 @@ def deliver_due(
 def run(max_iterations: int | None = None, idle_timeout: float | None = None) -> int:
     """Run the scheduler until it is stopped.
 
-    The scheduler sleeps until the exact moment the next card is due. When
+    The scheduler sleeps until the exact next due or reminder time. When
     nothing is scheduled it rescans the files once an hour, that is the
     safety net for a deck that was edited by hand. The optional idle timeout
     caps that sleep, it is only used by the tests.
@@ -290,12 +286,12 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
                     moment,
                     notify_enabled=settings.notify_enabled,
                 )
-                if report.handled:
-                    states = _save_marks(report.handled)
+                if report.reminded:
+                    states = _save_marks(report.reminded)
                 if not settings.notify_enabled:
-                    if report.handled and not disabled_notice:
+                    if report.reminded and not disabled_notice:
                         print(
-                            "notifications are disabled, marking due reminders as handled",
+                            "notifications are disabled, advancing the reminder clock without sending",
                             file=sys.stderr,
                             flush=True,
                         )
@@ -304,8 +300,6 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
                     disabled_notice = False
                     if report.delivered:
                         print(f"delivered {len(report.delivered)} reminder(s)", flush=True)
-                    elif report.skipped:
-                        print(f"skipped {len(report.skipped)} stale reminder(s)", flush=True)
                     if report.message and not report.notified:
                         if failures.should_log(report.message):
                             print(
@@ -319,7 +313,9 @@ def run(max_iterations: int | None = None, idle_timeout: float | None = None) ->
                             file=sys.stderr,
                             flush=True,
                         )
-                next_at = scheduler.next_wakeup(cards, states, models.now_utc())
+                next_at = scheduler.next_wakeup(
+                    cards, states, models.now_utc(), notify_enabled=settings.notify_enabled
+                )
                 if next_at is not None:
                     timeout = max(0.0, (next_at - models.now_utc()).total_seconds())
             except (ValueError, TypeError, OSError) as error:

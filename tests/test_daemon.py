@@ -46,11 +46,93 @@ def test_a_due_card_is_delivered(moment):
     assert "hello" in notifier.sent[0][1]
 
 
-def test_the_delivered_occurrence_is_marked_as_handled(moment):
+def test_the_delivered_card_records_the_reminder_time(moment):
     cards = {"hello": make_card()}
     states = {"hello": models.CardState(card_id="hello", due=DUE)}
     daemon.deliver_due(cards, states, moment, FakeNotifier())
-    assert states["hello"].handled_due is not None
+    assert states["hello"].last_reminded_at == models.iso(moment)
+
+
+def test_two_due_cards_share_one_grouped_notification(moment):
+    cards = {
+        "hello": make_card(),
+        "world": models.Card(
+            id="world",
+            term="world",
+            source_lang="en",
+            translations={"ar": "عالم"},
+            created_at=PAST,
+        ),
+    }
+    states = {
+        "hello": models.CardState(card_id="hello", due=DUE),
+        "world": models.CardState(card_id="world", due=DUE),
+    }
+    notifier = FakeNotifier()
+    daemon.deliver_due(cards, states, moment, notifier)
+    assert len(notifier.sent) == 1
+    title, body = notifier.sent[0]
+    assert title == "lingua-pulse: 2 cards are due"
+    assert "hello" in body
+    assert "world" in body
+    assert states["hello"].last_reminded_at == models.iso(moment)
+    assert states["world"].last_reminded_at == models.iso(moment)
+
+
+def test_a_card_is_notified_again_after_ten_minutes(moment):
+    cards = {"hello": make_card()}
+    states = {"hello": models.CardState(card_id="hello", due=DUE)}
+    notifier = FakeNotifier()
+    daemon.deliver_due(cards, states, moment, notifier)
+    second = daemon.deliver_due(cards, states, moment + timedelta(minutes=10), notifier)
+    assert len(notifier.sent) == 2
+    assert len(second.delivered) == 1
+
+
+def test_a_failing_notification_records_the_reminder_time(moment):
+    cards = {"hello": make_card()}
+    states = {"hello": models.CardState(card_id="hello", due=DUE)}
+    failing = FakeNotifier(notify.NotifyResult(False, 1, "Could not connect"))
+    daemon.deliver_due(cards, states, moment, failing)
+    assert states["hello"].last_reminded_at == models.iso(moment)
+
+
+def test_a_failed_notification_is_not_retried_inside_the_slot(moment):
+    cards = {"hello": make_card()}
+    states = {"hello": models.CardState(card_id="hello", due=DUE)}
+    failing = FakeNotifier(notify.NotifyResult(False, 1, "Could not connect"))
+    daemon.deliver_due(cards, states, moment, failing)
+    daemon.deliver_due(cards, states, moment + timedelta(minutes=5), failing)
+    assert len(failing.sent) == 1
+
+
+def test_disabled_notifications_record_the_reminder_time(moment):
+    cards = {"hello": make_card()}
+    states = {"hello": models.CardState(card_id="hello", due=DUE)}
+    notifier = FakeNotifier()
+    report = daemon.deliver_due(cards, states, moment, notifier, notify_enabled=False)
+    assert report.delivered == ()
+    assert notifier.sent == []
+    assert states["hello"].last_reminded_at == models.iso(moment)
+
+
+def test_three_slots_three_notifications(moment):
+    cards = {"hello": make_card()}
+    states = {"hello": models.CardState(card_id="hello", due=DUE)}
+    notifier = FakeNotifier()
+    for offset in (0, 10, 20):
+        report = daemon.deliver_due(cards, states, moment + timedelta(minutes=offset), notifier)
+        assert len(report.delivered) == 1
+    assert len(notifier.sent) == 3
+
+
+def test_an_overdue_card_is_delivered_immediately(moment):
+    cards = {"hello": make_card()}
+    states = {"hello": models.CardState(card_id="hello", due="2020-01-01T08:00:00+00:00")}
+    notifier = FakeNotifier()
+    report = daemon.deliver_due(cards, states, moment, notifier)
+    assert len(report.delivered) == 1
+    assert len(notifier.sent) == 1
 
 
 def test_a_card_is_not_notified_twice(moment):
@@ -61,16 +143,6 @@ def test_a_card_is_not_notified_twice(moment):
     second = daemon.deliver_due(cards, states, moment, notifier)
     assert len(notifier.sent) == 1
     assert second.delivered == ()
-
-
-def test_a_stale_backlog_is_skipped(moment):
-    cards = {"hello": make_card()}
-    states = {"hello": models.CardState(card_id="hello", due="2020-01-01T08:00:00+00:00")}
-    notifier = FakeNotifier()
-    report = daemon.deliver_due(cards, states, moment, notifier)
-    assert report.delivered == ()
-    assert notifier.sent == []
-    assert states["hello"].handled_due is not None
 
 
 def test_nothing_is_due_when_the_deck_is_empty(moment):
@@ -86,7 +158,7 @@ def test_a_failing_notification_is_reported(moment):
     report = daemon.deliver_due(cards, states, moment, failing)
     assert report.notified is False
     assert "Could not connect" in report.message
-    assert states["hello"].handled_due is not None
+    assert states["hello"].last_reminded_at is not None
 
 
 def test_the_lock_excludes_a_second_scheduler(home):
@@ -188,7 +260,7 @@ def test_a_grade_saved_while_sending_survives_the_marks(home, moment, monkeypatc
     assert saved.reps == graded["state"].reps
     assert saved.interval_days == graded["state"].interval_days
     assert saved.ease == graded["state"].ease
-    assert saved.handled_due == due
+    assert saved.last_reminded_at is not None
 
 
 def test_a_cli_grade_saved_while_sending_survives_the_marks(home, monkeypatch):
@@ -208,7 +280,7 @@ def test_a_cli_grade_saved_while_sending_survives_the_marks(home, monkeypatch):
     assert saved.reps == graded["state"].reps == 1
     assert saved.interval_days == graded["state"].interval_days
     assert saved.ease == graded["state"].ease
-    assert saved.handled_due == due
+    assert saved.last_reminded_at is not None
 
 
 def test_due_reminders_are_marked_when_notifications_are_disabled(home, monkeypatch, capsys):
@@ -220,10 +292,32 @@ def test_due_reminders_are_marked_when_notifications_are_disabled(home, monkeypa
     monkeypatch.setattr(daemon.notify, "send", lambda title, body: sent.append(title))
     assert daemon.run(max_iterations=1, idle_timeout=0.0) == 0
     assert sent == []
-    assert models.load_states(paths.state_path())["hello"].handled_due == due
+    assert models.load_states(paths.state_path())["hello"].last_reminded_at is not None
     captured = capsys.readouterr()
     assert "notifications are disabled" in captured.err
     assert "notification problem" not in captured.err
+
+
+def test_the_loop_ignores_reminder_slots_when_notifications_are_disabled(home, monkeypatch):
+    fixed = datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(models, "now_utc", lambda: fixed)
+    due = models.iso(fixed - timedelta(hours=1))
+    reminded = models.iso(fixed - timedelta(minutes=4))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(
+        paths.state_path(),
+        {"hello": models.CardState(card_id="hello", due=due, last_reminded_at=reminded)},
+    )
+    config.save_config(config.Config(notify_enabled=False))
+    timeouts = []
+
+    def fake_select(read, write, error, timeout):
+        timeouts.append(timeout)
+        return ([], [], [])
+
+    monkeypatch.setattr(daemon.select, "select", fake_select)
+    assert daemon.run(max_iterations=1) == 0
+    assert timeouts == [3600.0]
 
 
 def test_the_loop_sleeps_until_the_next_wakeup(home, monkeypatch):
@@ -241,6 +335,27 @@ def test_the_loop_sleeps_until_the_next_wakeup(home, monkeypatch):
     monkeypatch.setattr(daemon.select, "select", fake_select)
     assert daemon.run(max_iterations=1) == 0
     assert timeouts == [3600.0]
+
+
+def test_the_loop_sleeps_until_the_next_reminder(home, monkeypatch):
+    fixed = datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(models, "now_utc", lambda: fixed)
+    due = models.iso(fixed - timedelta(hours=1))
+    reminded = models.iso(fixed - timedelta(minutes=4))
+    models.save_deck(paths.deck_path(), {"hello": make_card()})
+    models.save_states(
+        paths.state_path(),
+        {"hello": models.CardState(card_id="hello", due=due, last_reminded_at=reminded)},
+    )
+    timeouts = []
+
+    def fake_select(read, write, error, timeout):
+        timeouts.append(timeout)
+        return ([], [], [])
+
+    monkeypatch.setattr(daemon.select, "select", fake_select)
+    assert daemon.run(max_iterations=1) == 0
+    assert timeouts == [360.0]
 
 
 def test_a_notification_problem_and_the_recovery_are_logged(home, monkeypatch, capsys):

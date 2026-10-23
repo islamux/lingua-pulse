@@ -1,7 +1,7 @@
 import json
 
 from conftest import write_broken_deck
-from linguapulse import cli, models, paths
+from linguapulse import cli, config, daemon, models, paths
 
 
 def test_add_stores_a_new_card(home, capsys):
@@ -169,6 +169,22 @@ def test_config_updates_the_settings(home, capsys):
     capsys.readouterr()
     assert cli.main(["config"]) == 0
     assert "zh" in capsys.readouterr().out
+
+
+def test_config_notify_signals_the_scheduler(home, capsys, monkeypatch):
+    signals = []
+    monkeypatch.setattr(daemon, "signal_scheduler", lambda: signals.append(True))
+
+    assert cli.main(["config", "--no-notify"]) == 0
+    assert config.load_config().notify_enabled is False
+    assert len(signals) == 1
+
+    assert cli.main(["config", "--notify"]) == 0
+    assert config.load_config().notify_enabled is True
+    assert len(signals) == 2
+
+    assert cli.main(["config", "--target-lang", "zh"]) == 0
+    assert len(signals) == 2
 
 
 def test_config_rejects_an_unknown_language(home, capsys):
